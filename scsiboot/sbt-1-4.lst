@@ -1,0 +1,1285 @@
+   1:				; 02 Nov 88.. swh 
+   2:				;         * * * * * * * * * * * * * * * * * * * * * * * *
+   3:				;         *                                             *
+   4:				;         *       SCSI/Floppy/Hard Disk Boot ROM        *
+   5:				;         *                                             *
+   6:				;         * Copyright (C) 1983, 1984, 1985, 1986, 1988  *
+   7:				;         *            AMPRO Computers, Inc.            *
+   8:				;         *             All rights reserved.            *
+   9:				;         *                                             *
+  10:				;         * * * * * * * * * * * * * * * * * * * * * * * *
+  11:				;
+  12:				;
+  13:				;  Revision history:
+  14:				;
+  15:				;  Ver  Date      Who     Description
+  16:				;  ---  --------  ---     -----------------------------------------
+  17:				;  1.4  08/05/21  swh     Modified board to connect EPROM enable to
+  18:				;			  FDC reset line. That way, I can turn off
+  19:				;			  the floppy drive motors when booting from
+  20:				;			  a SCSI drive.
+  21:				;  1.3  11/02/88  swh     Changed scsi routines to current bios 3.8
+  22:				;			  routines to fix problems with SETPRAM call.
+  23:				;			  WSCSI was overwriting contents of DATPTR
+  24:				;			  every time it was called, creating havoc
+  25:				;			  when it came time to send the drive parms
+  26:				;			  to the controller.
+  27:				;
+  28:				;  1.2  03/27/86  fsw     Changed scsi select routine to current bios
+  29:				;                         3.6 routines. Added SCSI retries. Fixed 
+  30:				;			  arbitration to provide exit if scsi reset 
+  31:				;			  occurs during arbitration time.
+  32:				;
+  33:				;  1.1  10/18/85  fsw     Corrected problem booting from 96 tpi disk.
+  34:				;			  Added 5 tries for floppy disk reads and
+  35:				;			  jmp for drive prameters initialization.
+  36:				;
+  37:				;  1.0   9/17/85  fsw	  Initial release.
+  38:				;
+  39:				;
+  40:				;
+  41:				;                            DESCRIPTION
+  42:				;
+  43:				; This ROM will boot from floppy, hard disk, or SCSI disk server,
+  44:				; and is based on the orginal AMPRO boot ROM and the SCSI routines
+  45:				; in Version 3 BIOS.  Arbration is used in the SCSI routines.
+  46:				;
+  47:				; No alteration to boot sector is required to boot from floppy.
+  48:				; Booting from hard disk requires the use of the HGEN utility, to
+  49:				; install a sector on the hard disk containing hard disk system
+  50:				; configuration info, and to add code to the boot loader for hard
+  51:				; disk configuration initialization.
+  52:				;
+  53:				; 			 THEORY OF OPERATION   
+  54:				;
+  55:				; The ROM on reset begins execution at 0000H.  It first relocates
+  56:				; itself to 8000H then continues executation above 8000H.  
+  57:				; The ROM then loads in a "boot loader" sector from floppy, hard disk,
+  58:				; or other SCSI device.  
+  59:				;
+  60:				; The first attempt is to load a boot loader from side 0, track 0 
+  61:				; sector one of floppy drive "A" (drive select "1"), if a floppy
+  62:				; is present in that drive.  If the first byte of that sector is not
+  63:				; an LXI H or MVI A op code, then an attempt to load a boot loader
+  64:				; from an SCSI device is made.  SCSI ID 0 is used as the SCSI boot
+  65:				; device if the board's ID is jumpered as 7.  Otherwise, SCSI ID 7
+  66:				; is used for the attempt to boot from SCSI.  
+  67:				;
+  68:				; If the appropriate SCSI device is not able to 
+  69:				; provide a legal boot loader (with LXI H or MVI A op code as first
+  70:				; byte), then the process begins again, looping until a legal "boot
+  71:				; loader" is obtained.  
+  72:				;
+  73:				; The boot loader is stored at 9000H, followed by a jump to that
+  74:				; address.  The contents of the boot loader determine what happens
+  75:				; next.  Normally the ROM is switched off first thing.
+  76:				;
+  77:				; This accommodates:
+  78:				;
+  79:				;       o  Hard disk drive spinup
+  80:				;       o  User choice of boot device
+  81:				;       o  Networking
+  82:				;       o  Odd-ball applications!
+  83:				;
+  84:				;
+  85:				; 				MISC NOTES
+  86:				;
+  87:				; Supports floppy drive step rate of 6 msec only for compatability
+  88:				; with the 1770 or 1772 fdc. 
+  89:				;
+  90:				; Supports hard disk with 512 byte sectors only.  Each call to read
+  91:				; track reads one AMPRO track of 16 sectors when booting from hard
+  92:				; disk.
+  93:				;
+  94:				; Requires the use of SCSI self-initializing controllers, such as
+  95:				; Adaptec ACB-4000, Shugart 1610-4, Xebec OWL drive/controller, etc.
+  96:				;
+  97:				;                                FEATURES
+  98:				;
+  99:				; 	Test for presence of 177x floppy disk controller and
+ 100:				; 	for 5380 SCSI controller. 
+ 101:				;
+ 102:				;	Test for presence of boot sector on the disk it has read. 
+ 103:				;
+ 104:				;	Test for properly formated floppy disk in drive.
+ 105:				;
+ 106:				;	If unable to boot from floppy disk will try SCSI, if
+ 107:				;	unable to boot from SCSI, starts over. This sequence 
+ 108:				;	will repeat untill sucessful.
+ 109:				;
+ 110:				;
+ 111:				;                           SCSI ID CONVENTIONS
+ 112:				;
+ 113:				; SCSI Master mode:  Set board SCSI ID to 7 (refer to board manual).
+ 114:				;       When the board's SCSI ID is 7, the boot ROM issues an SCSI
+ 115:				;       bus reset, and then uses the device at SCSI ID 0 as the
+ 116:				;	SCSI boot device, if floppy boot attempt fails.
+ 117:				;
+ 118:				; SCSI Slave mode:  Set board SCSI ID to anything other than 7.
+ 119:				;	When the board's SCSI ID is not 7, the boot ROM does not
+ 120:				;	issue an SCSI bus reset.  In this case the device at SCSI
+ 121:				;	ID 7 is used as the SCSI boot device if the floppy boot 
+ 122:				;	attempt fails.  This might be a disk server rather than
+ 123:				;	a disk controller.
+ 124:				;
+ 125:				; In all cases if will boot from floppy in drive "A" if a legal boot
+ 126:				;	sector is present (as defined above)
+ 127:				;********************************************************************
+ 128:				;
+ 129:     -	0001          	YES	EQU	1
+ 130:     -	0000          	NO	EQU	0
+ 131:				
+ 132:     -	00A7          	MSEC	EQU	167
+ 133:     -	000D          	CR	EQU	0DH
+ 134:     -	000A          	LF	EQU	0AH
+ 135:     -	0000          	CONT	EQU	0		; system control port
+ 136:     -	0010          	SID1	EQU	10H		; select side one of disk
+ 137:     -	0020          	SDEN	EQU	20H		; select single density
+ 138:     -	0040          	ROMOFF	EQU	40H		; turn rom off
+ 139:				
+ 140:     -	8000          	BOOT	EQU	8000H		; origin of this program
+ 141:     -	9000          	RAM	EQU	9000H		; beginning of scratch ram
+ 142:     -	9000          	STACK	EQU	RAM		; stack pointer
+ 143:				
+ 144:     -	0040          	CTCA	EQU	40H		; counter/timer
+ 145:     -	0040          	CTCA0	EQU	CTCA
+ 146:     -	0050          	CTCA1	EQU	CTCA+10H
+ 147:     -	0060          	CTCA2	EQU	CTCA+20H
+ 148:     -	0070          	CTCA3	EQU	CTCA+30H
+ 149:				
+ 150:     -	0080          	SIO	EQU	80H		; serial io
+ 151:     -	0080          	SIOAD	EQU	SIO
+ 152:     -	0088          	SIOBD	EQU	SIO+8
+ 153:     -	0084          	SIOAC	EQU	SIO+4
+ 154:     -	008C          	SIOBC	EQU	SIO+12
+ 155:				
+ 156:     -	00C0          	CMND	EQU	0C0H
+ 157:     -	00C1          	WTRK	EQU	CMND+1
+ 158:     -	00C2          	WSEC	EQU	CMND+2
+ 159:     -	00C3          	WDAT	EQU	CMND+3
+ 160:				
+ 161:     -	00C4          	STAT	EQU	CMND+4
+ 162:     -	00C5          	RTRK	EQU	CMND+5
+ 163:     -	00C6          	RSEC	EQU	CMND+6
+ 164:     -	00C7          	RDAT	EQU	CMND+7
+ 165:				
+ 166:     -	0008          	REST	EQU	08H
+ 167:     -	0058          	STEPI	EQU	58H
+ 168:     -	0088          	RDSEC	EQU	88H
+ 169:     -	00C8          	RDID	EQU	0C8H
+ 170:     -	00D0          	FI	EQU	0D0H
+ 171:				
+ 172:     -	0018          	ERMSK	EQU	18H
+ 173:				
+ 174:     -	0029          	ID	EQU	29H		; Little board SCSI id
+ 175:				;
+ 176:				;  NCR 5380 controller equates
+ 177:				;
+ 178:     -	0020          	NCRBASE EQU	20H		; Base address of NCR 5380
+ 179:     -	0020          	NCRCSD	EQU	NCRBASE+0	; (R)  Current SCSI data register
+ 180:     -	0020          	NCRODR	EQU	NCRBASE+0	; (W)  Output data register
+ 181:     -	0021          	NCRICR	EQU	NCRBASE+1	; (RW) Initiator command register
+ 182:     -	0022          	NCRMR	EQU	NCRBASE+2	; (RW) Mode register
+ 183:     -	0023          	NCRTCR	EQU	NCRBASE+3	; (RW) Target command register
+ 184:     -	0024          	NCRCSBS EQU	NCRBASE+4	; (R)  Current SCSI bus status
+ 185:     -	0024          	NCRSER	EQU	NCRBASE+4	; (W)  Select enable register
+ 186:     -	0025          	NCRBSR	EQU	NCRBASE+5	; (R)  Bus & status register
+ 187:     -	0025          	NCRSDS	EQU	NCRBASE+5	; (W)  Start DMA send
+ 188:     -	0026          	NCRIDR	EQU	NCRBASE+6	; (R)  Input data register
+ 189:     -	0026          	NCRSDTR EQU	NCRBASE+6	; (W)  Start DMA target receive
+ 190:     -	0027          	NCRRPI	EQU	NCRBASE+7	; (R)  Reset parity/interrupt
+ 191:     -	0027          	NCRSDIR EQU	NCRBASE+7	; (W)  Start DMA initiator receive
+ 192:     -	0028          	NCRDACK EQU	NCRBASE+8	; (RW) DACK pseudo-DMA register
+ 193:				
+ 194:				; Current SCSI bus status (NCRCSBS)
+ 195:				
+ 196:     -	0080          	NCRRST	EQU	10000000B	; Reset
+ 197:     -	0040          	NCRBSY	EQU	01000000B	; Busy
+ 198:     -	0020          	NCRREQ	EQU	00100000B	; Request
+ 199:     -	0010          	NCRMSG	EQU	00010000B	; Message
+ 200:     -	0008          	NCRCD	EQU	00001000B	; Control/Data
+ 201:     -	0004          	NCRIO	EQU	00000100B	; Input/Output
+ 202:     -	0002          	NCRSEL	EQU	00000010B	; Select
+ 203:     -	0001          	NCRDBP	EQU	00000001B	; Data bus parity
+ 204:				;...............................................................
+ 205:				
+ 206:     -	8000          		ORG	BOOT
+ 207:				
+ 208:    0+10	8000  C32C00  		JP	START -BOOT	; power on or re-boot
+ 209:   10+10	8003  C37E81  		JP	SETUP		; setup disk drive
+ 210:   20+10	8006  C33082  		JP	STEPIN		; step in one track
+ 211:   30+10	8009  C36F82  		JP	SIDEONE		; select side one
+ 212:   40+10	800C  C35082  		JP	FDCLR		; clear the fdc
+ 213:   50+10	800F  C36882  		JP	SETDMA		; set new dmaadr (hl)
+ 214:   60+10	8012  C39081  		JP	READTRK		; read current track at dmaadr
+ 215:   70+10	8015  C30682  		JP	READSEC		; read current sector at dmaadr
+ 216:   80+10	8018  C3E081  		JP	READID		; read next sector address
+ 217:   90+10	801B  C34483  		JP	SETPRAM		; pass the hard disk prameters to the
+ 218:								; scsi controller, for dumb controllers.
+ 219:				
+ 220:     -	801E  0000    	DMAADR:	DEFW	0
+ 221:     -	8020  00000000	IDSV:	DEFW	0,0,0
+	              0000
+ 222:     -	8026  00      	SELBYT:	DEFB	0
+ 223:     -	8027  00      	TRACK:	DEFB	0
+ 224:     -	8028  00      	SECTOR:	DEFB	0
+ 225:     -	8029  00      	STATUS:	DEFB	0
+ 226:     -	802A  00      	TWOSID:	DEFB	0
+ 227:     -	802B  00      	SBIAS:	DEFB	0
+ 228:				
+ 229:  100+4	802C  F3      	START:	DI
+ 230:  104+4	802D  AF      		XOR	A		; clear system control register
+ 231:  108+11	802E  D300    		OUT	(CONT),A	; and reset FDC
+ 232:  119+10	8030  210000  		LD	HL,0
+ 233:  129+10	8033  110080  		LD	DE,BOOT
+ 234:  139+7	8036  7E      	RELOC:	LD	A,(HL)
+ 235:  146+7	8037  12      		LD	(DE),A
+ 236:  153+6	8038  23      		INC	HL
+ 237:  159+6	8039  13      		INC	DE
+ 238:  165+4	803A  7C      		LD	A,H
+ 239:  169+7	803B  FE10    		CP	16		; relocate 16 pages
+ 240:  176+10	803D  C23600  		JP	NZ,RELOC -BOOT	; this code runs at address 0
+ 241:  186+10	8040  C3AB80  		JP	INITSYS		; this code runs relative to boot
+ 242:				
+ 243:				; copyright declaration
+ 244:				
+ 245:     -	8043  53435349		DEFB	'SCSI Boot Rom Version 1.4 - (C) 1983,1984,1985,1986,1988 '
+	              20426F6F
+	              7420526F
+	              6D205665
+	              7273696F
+	              6E20312E
+	              34202D20
+	              28432920
+	              31393833
+	              2C313938
+	              342C3139
+	              38352C31
+	              3938362C
+	              31393838
+	              20
+ 246:     -	807C  2D20414D		DEFB	'- AMPRO Computers, Inc. - All rights reserved. '
+	              50524F20
+	              436F6D70
+	              75746572
+	              732C2049
+	              6E632E20
+	              2D20416C
+	              6C207269
+	              67687473
+	              20726573
+	              65727665
+	              642E20
+ 247:				
+ 248:  196+10	80AB  310090  	INITSYS:LD	SP,STACK	; set local stack
+ 249:  206+7	80AE  3E40    		LD	A,ROMOFF	; now that we're in RAM @ 8000, we can
+ 250:  213+11	80B0  D300    		OUT	(CONT),A	; turn off the EPROM and bring the FDC
+ 251:								; out of reset
+ 252:  224+10	80B2  21C380  		LD	HL,CTCTBL
+ 253:  234+7	80B5  7E      	CTCINT:	LD	A,(HL)
+ 254:  241+4	80B6  3C      		INC	A
+ 255:  245+10	80B7  CACD80  		JP	Z,SIOINT
+ 256:  255+4	80BA  3D      		DEC	A
+ 257:  259+11	80BB  D340    		OUT	(CTCA0),A
+ 258:  270+11	80BD  D350    		OUT	(CTCA1),A
+ 259:  281+6	80BF  23      		INC	HL
+ 260:  287+10	80C0  C3B580  		JP	CTCINT
+ 261:				
+ 262:     -	80C3  470DFF  	CTCTBL:	DEFB	47H,13,255	; 9600
+ 263:				;CTCTBL:	DB	3,0,255			;19200
+ 264:				
+ 265:     -	80C6  0446    	SIOTBL:	DEFB	4,46H		; x16 clock, 1 stop bit, parity disable
+ 266:     -	80C8  05EA    		DEFB	5,0EAH		; DTR, 8 bits, no break, Tx enable, RTS
+ 267:     -	80CA  03C1    		DEFB	3,0C1H		; Rx 8 bits, no auto enables, Rx enable
+ 268:     -	80CC  FF      		DEFB	255		; 9600
+ 269:				;SIOTBL:	DB	4,84H,5,06AH,3,0C1H,255		;19200
+ 270:				
+ 271:  297+10	80CD  21C680  	SIOINT:	LD	HL,SIOTBL
+ 272:  307+7	80D0  7E      	SIOLP:	LD	A,(HL)
+ 273:  314+4	80D1  3C      		INC	A
+ 274:  318+10	80D2  CADE80  		JP	Z,CBOOT
+ 275:  328+4	80D5  3D      		DEC	A
+ 276:  332+11	80D6  D384    		OUT	(SIOAC),A
+ 277:  343+11	80D8  D38C    		OUT	(SIOBC),A
+ 278:  354+6	80DA  23      		INC	HL
+ 279:  360+10	80DB  C3D080  		JP	SIOLP
+ 280:				;				; fall thru to CBOOT
+ 281:								
+ 282:				; cboot is the start of the read disk routines. 
+ 283:				;
+ 284:				; check little board id, if id = 7 do SCSI reset, if id not=7 
+ 285:				; no reset is issued.
+ 286:				;
+ 287:				; a 1 second time delay is invoked prior to SCSI reset to allow
+ 288:				; various SCSI devices do their powerup initialization before
+ 289:				; the SCSI reset is issued.
+ 290:				;
+ 291:  370+11	80DE  DB29    	CBOOT:	IN	A,(ID)		; get little board SCSI id
+ 292:  381+7	80E0  E607    		AND	07H		; mask off
+ 293:  388+4	80E2  3C      		INC	A		; make 1 thru 8
+ 294:  392+4	80E3  47      		LD	B,A		; set 'b' for count
+ 295:  396+4	80E4  AF      		XOR	A
+ 296:  400+4	80E5  37      		SCF			; set carry
+ 297:  404+4	80E6  17      	SETID:	RLA
+ 298:  408+4	80E7  05      		DEC	B
+ 299:  412+10	80E8  C2E680  		JP	NZ,SETID
+ 300:  422+13	80EB  32DE84  		LD	(MYID),A
+ 301:  435+7	80EE  FE80    		CP	80H		; scsi id 7
+ 302:  442+7	80F0  3E80    		LD	A,10000000B	; target id=7
+ 303:  449+10	80F2  C20881  		JP	NZ,RESETNOT
+ 304:  459+7	80F5  3E04    		LD	A,4		; 4 x .25 sec
+ 305:  466+17	80F7  CDD582  		CALL	TIMER
+ 306:  483+7	80FA  3E80    		LD	A,80H		; scsi reset
+ 307:  490+11	80FC  D321    		OUT	(NCRICR),A	; set reset line high
+ 308:  501+4	80FE  3D      	HOLDIT:	DEC	A
+ 309:  505+10	80FF  C2FE80  		JP	NZ,HOLDIT	; 50 usec min
+ 310:  515+11	8102  D321    		OUT	(NCRICR),A	; clear reset line
+ 311:  526+11	8104  DB27    		IN	A,(NCRRPI)	; and the interrupt line
+ 312:  537+7	8106  3E01    		LD	A,00000001B	; target id=0
+ 313:				;
+ 314:				; has target id in 'a'. if little board id=7 boot from device 0.
+ 315:				; if little board id not=7, boot from device 7.
+ 316:				;
+ 317:     -	8108          	RESETNOT:
+ 318:  544+13	8108  32DF84  		LD	(TARGET),A	; device to boot from
+ 319:  557+4	810B  AF      		XOR	A
+ 320:  561+11	810C  D321    		OUT	(NCRICR),A	; clear the 5380 registers
+ 321:  572+11	810E  D322    		OUT	(NCRMR),A
+ 322:  583+11	8110  D323    		OUT	(NCRTCR),A
+ 323:  594+11	8112  D324    		OUT	(NCRSER),A
+ 324:  605+11	8114  DB22    		IN	A,(NCRMR)	; read the mode register
+ 325:								; mode register should equal 0 if
+ 326:								; 5380 is present.
+ 327:				
+ 328:  616+13	8116  32EA84  		LD	(SCSI),A	; set scsi to zero or non-zero to 
+ 329:								; show presence of ncr 5380
+ 330:				
+ 331:				;
+ 332:				; everything on the SCSI buss should have completed initialization and
+ 333:				; SCSI reset may have been issued. 
+ 334:				;
+ 335:				; test for presence of 177x floppy disk controller.
+ 336:				;
+ 337:  629+7	8119  3EAA    		LD	A,0AAH		; test for presence of fdc
+ 338:  636+11	811B  D3C2    		OUT	(WSEC),A	; write pattern to sector reg
+ 339:  647+4	811D  47      		LD	B,A		; save in 'b'
+ 340:  651+7	811E  E60F    		AND	0FH		; set up loop value
+ 341:  658+4	8120  3D      	CLOOP:	DEC	A		; give the 177x time for the sec reg
+ 342:  662+10	8121  C22081  		JP	NZ,CLOOP	;   to set up.
+ 343:  672+11	8124  DBC6    		IN	A,(RSEC)	; read the sector reg
+ 344:  683+4	8126  B8      		CP	B		; see if same as written to sec reg
+ 345:  687+10	8127  CA3281  		JP	Z,CBOOT2	; 
+ 346:  697+10	812A  C3EA82  		JP	TRY$HD$DVR	; do hard disk, no fdc present
+ 347:				;
+ 348:				; floppy disk controller present try to boot from floppy
+ 349:				;
+ 350:  707+7	812D  3E05    		LD	A,5
+ 351:  714+13	812F  32DA84  		LD	(INT$RETRIES),A	; set up try count
+ 352:  727+17	8132  CD7E81  	CBOOT2:	CALL	SETUP
+ 353:  744+17	8135  CDE081  		CALL	READID
+ 354:  761+17	8138  CD7782  		CALL	ERROR
+ 355:  778+10	813B  C23281  		JP	NZ,CBOOT2	; try to read id 5 times
+ 356:  788+7	813E  3E05    		LD	A,5
+ 357:  795+13	8140  32DA84  		LD	(INT$RETRIES),A	; reset floppy try counter
+ 358:  808+13	8143  3A2280  		LD	A,(IDSV+2)	; get sector #
+ 359:  821+7	8146  FE11    		CP	17
+ 360:  828+7	8148  3E00    		LD	A,0
+ 361:  835+10	814A  DA4E81  		JP	C,CB0
+ 362:  845+4	814D  3C      		INC	A
+ 363:  849+13	814E  322A80  	CB0:	LD	(TWOSID),A
+ 364:  862+4	8151  B7      		OR	A
+ 365:  866+4	8152  17      		RLA
+ 366:  870+4	8153  17      		RLA
+ 367:  874+4	8154  17      		RLA
+ 368:  878+4	8155  17      		RLA
+ 369:  882+13	8156  322B80  		LD	(SBIAS),A	; 0 if single sided, 16 if 2 sided
+ 370:  895+10	8159  210090  		LD	HL,RAM
+ 371:  905+16	815C  221E80  		LD	(DMAADR),HL
+ 372:  921+4	815F  3C      		INC	A		; sector 1 ( or 17 )
+ 373:  925+11	8160  D3C2    		OUT	(WSEC),A
+ 374:  936+17	8162  CD0682  		CALL	READSEC
+ 375:  953+17	8165  CD7782  		CALL	ERROR
+ 376:  970+13	8168  3A2A80  		LD	A,(TWOSID)
+ 377:  983+10	816B  C24E81  		JP	NZ,CB0		; error occured try to read again
+ 378:  993+13	816E  3A0090  		LD	A,(RAM)		; see if boot record there
+ 379: 1006+7	8171  FE21    		CP	21H		; starts with lxi h,xxxx
+ 380: 1013+10	8173  CA0090  		JP	Z,RAM
+ 381: 1023+7	8176  FE3E    		CP	3EH		; other choice is mvi a,xx
+ 382: 1030+10	8178  CA0090  		JP	Z,RAM
+ 383: 1040+10	817B  C3EA82  		JP	TRY$HD$DVR	; see if can do hard disk
+ 384:				
+ 385: 1050+7	817E  3E41    	SETUP:	LD	A,'A'-40H+ROMOFF
+ 386: 1057+11	8180  D300    		OUT	(CONT),A	; select a:, side 0
+ 387: 1068+13	8182  322680  		LD	(SELBYT),A	; save it
+ 388: 1081+17	8185  CD5082  		CALL	FDCLR
+ 389: 1098+7	8188  3E08    		LD	A,REST		; restore
+ 390: 1105+17	818A  CD5F82  		CALL	OUTCMD		; to fdc
+ 391: 1122+10	818D  C3AC82  		JP	FDWAIT		; Wait for command to complete and ret
+ 392:				;
+ 393:				; Read current track at dmaadr
+ 394:				;
+ 395:     -	8190          	READTRK:
+ 396: 1132+13	8190  3A2380  		LD	A,(IDSV+3)	; sector size
+ 397: 1145+7	8193  FE03    		CP	3
+ 398: 1152+10	8195  21DA81  		LD	HL,SKWTBL1	; 96 tpi disk
+ 399: 1162+10	8198  CA9E81  		JP	Z,RTLOOP
+ 400: 1172+10	819B  21CF81  		LD	HL,SKWTBL	; sector skew table
+ 401: 1182+7	819E  3E05    	RTLOOP:	LD	A,5		; 
+ 402: 1189+13	81A0  32DA84  		LD	(INT$RETRIES),A	; set floppy try counter
+ 403: 1202+7	81A3  4E      		LD	C,(HL)
+ 404: 1209+6	81A4  23      		INC	HL
+ 405: 1215+4	81A5  0C      		INC	C
+ 406: 1219+5+6	81A6  C8      		RET	Z		; finished
+ 407: 1224+4	81A7  0D      		DEC	C
+ 408: 1228+13	81A8  3A2B80  		LD	A,(SBIAS)
+ 409: 1241+4	81AB  81      		ADD	A,C
+ 410: 1245+13	81AC  322880  		LD	(SECTOR),A
+ 411: 1258+11	81AF  D3C2    		OUT	(WSEC),A
+ 412: 1269+11	81B1  E5      	RSAGN:	PUSH	HL		; save skew table pointer
+ 413: 1280+17	81B2  CD0682  		CALL	READSEC		; read the sector
+ 414: 1297+17	81B5  CD7782  		CALL	ERROR		; check for errors
+ 415: 1314+10	81B8  C2C581  		JP	NZ,RSAGN1	; try to read the sector again
+ 416: 1324+16	81BB  2A1E80  		LD	HL,(DMAADR)	; get current dmaadr address
+ 417: 1340+16	81BE  22DB84  		LD	(DMA),HL	; save current dma addr
+ 418: 1356+10	81C1  E1      		POP	HL		; restore skew table pointer
+ 419: 1366+10	81C2  C39E81  		JP	RTLOOP		; next sector
+ 420:				;
+ 421:				; if error on read sector, restores old dma address and attempts
+ 422:				; to read the same sector again.
+ 423:				;
+ 424: 1376+16	81C5  2ADB84  	RSAGN1:	LD	HL,(DMA)	; get old dmaadr dma address
+ 425: 1392+16	81C8  221E80  		LD	(DMAADR),HL	; restore dma address
+ 426: 1408+10	81CB  E1      		POP	HL		; restore stack
+ 427: 1418+10	81CC  C3B181  		JP	RSAGN
+ 428:				;
+ 429:     -	81CF  01020304	SKWTBL:	DEFB	1,2,3,4,5,6,7,8,9,10,255
+	              05060708
+	              090AFF
+ 430:     -	81DA  01020304	SKWTBL1:DEFB	1,2,3,4,5,255
+	              05FF
+ 431:				;
+ 432:				; read id twice, once to see if disk in drive, the second for
+ 433:				; the id value.
+ 434:				;
+ 435: 1428+11	81E0  DBC4    	READID:	IN	A,(STAT)
+ 436: 1439+11	81E2  DBC7    		IN	A,(RDAT)
+ 437: 1450+7	81E4  3EC8    		LD	A,RDID
+ 438: 1457+17	81E6  CD5F82  		CALL	OUTCMD
+ 439: 1474+17	81E9  CDAC82  		CALL	FDWAIT		; See if will time out
+ 440: 1491+7	81EC  FEFF    		CP	255		; no floppy
+ 441: 1498+13	81EE  322980  		LD	(STATUS),A	; if timeout error, set error status
+ 442: 1511+5+6	81F1  C8      		RET	Z		; if timeout just return
+ 443: 1516+11	81F2  DBC4    		IN	A,(STAT)	; clear fdc reg
+ 444: 1527+11	81F4  DBC7    		IN	A,(RDAT)
+ 445: 1538+10	81F6  212080  		LD	HL,IDSV
+ 446: 1548+7	81F9  3EC8    		LD	A,RDID
+ 447: 1555+17	81FB  CD5F82  		CALL	OUTCMD
+ 448: 1572+17	81FE  CD2082  		CALL	RD
+ 449: 1589+4	8201  78      		LD	A,B
+ 450: 1593+13	8202  322980  		LD	(STATUS),A
+ 451: 1606+10	8205  C9      		RET
+ 452:				
+ 453: 1616+11	8206  DBC4    	READSEC:IN	A,(STAT)	; clear status
+ 454: 1627+11	8208  DBC7    		IN	A,(RDAT)	; clear any trash
+ 455: 1638+16	820A  2A1E80  		LD	HL,(DMAADR)
+ 456: 1654+17	820D  CD5082  		CALL	FDCLR
+ 457: 1671+7	8210  3E88    		LD	A,RDSEC		; read sector command
+ 458: 1678+17	8212  CD5F82  		CALL	OUTCMD		; to fdc
+ 459: 1695+17	8215  CD2082  		CALL	RD		; read loop
+ 460: 1712+4	8218  78      		LD	A,B
+ 461: 1716+13	8219  322980  		LD	(STATUS),A
+ 462: 1729+16	821C  221E80  		LD	(DMAADR),HL
+ 463: 1745+10	821F  C9      		RET
+ 464:				
+ 465: 1755+11	8220  DBC4    	RD:	IN	A,(STAT)
+ 466: 1766+4	8222  47      		LD	B,A		; save status
+ 467: 1770+4	8223  1F      		RRA
+ 468: 1774+5+6	8224  D0      		RET	NC		; return when fdc not busy
+ 469: 1779+4	8225  1F      		RRA
+ 470: 1783+10	8226  D22082  		JP	NC,RD		; wait for drq
+ 471: 1793+11	8229  DBC7    		IN	A,(RDAT)
+ 472: 1804+7	822B  77      		LD	(HL),A
+ 473: 1811+6	822C  23      		INC	HL
+ 474: 1817+10	822D  C32082  		JP	RD
+ 475:				
+ 476: 1827+13	8230  3A2A80  	STEPIN:	LD	A,(TWOSID)
+ 477: 1840+4	8233  B7      		OR	A
+ 478: 1844+10	8234  CA4482  		JP	Z,STPI
+ 479: 1854+17	8237  CD6F82  		CALL	SIDEONE
+ 480: 1871+10	823A  212780  		LD	HL,TRACK
+ 481: 1881+11	823D  35      		DEC	(HL)
+ 482: 1892+10	823E  21A700  		LD	HL,MSEC		; wait one millisecond
+ 483: 1902+10	8241  C39782  		JP	WT		; wt returns to caller
+ 484: 1912+7	8244  3E58    	STPI:	LD	A,STEPI		; step in command
+ 485: 1919+17	8246  CD5F82  		CALL	OUTCMD
+ 486: 1936+11	8249  DBC4    	STLP:	IN	A,(STAT)
+ 487: 1947+4	824B  1F      		RRA
+ 488: 1951+10	824C  DA4982  		JP	C,STLP
+ 489: 1961+10	824F  C9      		RET
+ 490:				
+ 491: 1971+7	8250  3ED0    	FDCLR:	LD	A,FI
+ 492: 1978+11	8252  D3C0    		OUT	(CMND),A
+ 493: 1989+7	8254  3E00    		LD	A,0
+ 494: 1996+4	8256  3D      	CL:	DEC	A
+ 495: 2000+10	8257  C25682  		JP	NZ,CL
+ 496: 2010+11	825A  DBC4    		IN	A,(STAT)
+ 497: 2021+11	825C  DBC7    		IN	A,(RDAT)
+ 498: 2032+10	825E  C9      		RET
+ 499:				
+ 500: 2042+11	825F  D3C0    	OUTCMD:	OUT	(CMND),A
+ 501: 2053+7	8261  3E13    		LD	A,19
+ 502: 2060+4	8263  3D      	OC0:	DEC	A
+ 503: 2064+10	8264  C26382  		JP	NZ,OC0		; wait 66.5 usec for fdc to set-up
+ 504: 2074+10	8267  C9      		RET
+ 505:				
+ 506: 2084+16	8268  221E80  	SETDMA:	LD	(DMAADR),HL
+ 507: 2100+16	826B  22DB84  		LD	(DMA),HL
+ 508: 2116+10	826E  C9      		RET
+ 509:				
+ 510: 2126+13	826F  3A2680  	SIDEONE:LD	A,(SELBYT)
+ 511: 2139+7	8272  F610    		OR	SID1
+ 512: 2146+11	8274  D300    		OUT	(CONT),A
+ 513: 2157+10	8276  C9      		RET
+ 514:				;
+ 515:				; floppy error checking enters here.  Returns with zero flag NZ if
+ 516:				; error, or Z if no error.  Floppy routines must set STATUS for error
+ 517:				; conditions.
+ 518:				;
+ 519: 2167+13	8277  3A2980  	ERROR:	LD	A,(STATUS)
+ 520: 2180+7	827A  E618    		AND	ERMSK
+ 521: 2187+5+6	827C  C8      		RET	Z
+ 522: 2192+11	827D  E5      		PUSH	HL
+ 523: 2203+10	827E  21DA84  		LD	HL,INT$RETRIES	; point to retries
+ 524: 2213+11	8281  35      		DEC	(HL)		; retries -1
+ 525: 2224+10	8282  E1      		POP	HL
+ 526: 2234+5+6	8283  C0      		RET	NZ		; try again
+ 527: 2239+17	8284  CD9E82  		CALL	FDCRESET
+ 528: 2256+13	8287  3AEA84  		LD	A,(SCSI)	; get 5380 present byte
+ 529: 2269+4	828A  A7      		AND	A
+ 530: 2273+10	828B  CAEF82  		JP	Z,HD$DVR	; Try hard disk, have timed out on floppy
+ 531:								; disk at least 5 times
+ 532:				;
+ 533:				; floppy error falls thru to here also hard disk errors enter here to
+ 534:				; start the hole proceedure over and over again.
+ 535:				;
+ 536: 2283+4	828E  AF      	ERROR1:	XOR	A		; make sure prom is turned on
+ 537: 2287+11	828F  D300    		OUT	(CONT),A	; (also resets FDC)
+ 538: 2298+10	8291  C30000  		JP	0		; jmp to prom
+ 539:				;
+ 540: 2308+10	8294  213C41  	WAIT:	LD	HL,100 * MSEC
+ 541: 2318+6	8297  2B      	WT:	DEC	HL
+ 542: 2324+4	8298  7C      		LD	A,H
+ 543: 2328+4	8299  B5      		OR	L
+ 544: 2332+10	829A  C29782  		JP	NZ,WT
+ 545: 2342+10	829D  C9      		RET
+ 546:				;
+ 547:     -	829E          	FDCRESET:
+ 548: 2352+4	829E  AF      		XOR	A		; re-enable ROM and reset FDC
+ 549: 2356+11	829F  D300    		OUT	(CONT),A
+ 550: 2367+7	82A1  3E1D    		LD	A,29
+ 551: 2374+4	82A3  3D      	ERROR0:	DEC	A
+ 552: 2378+10	82A4  C2A382  		JP	NZ,ERROR0	; wait 100 usec for fdc to reset
+ 553: 2388+7	82A7  3E40    		LD	A,ROMOFF	; turn ROM off and bring FDC 
+ 554: 2395+11	82A9  D300    		OUT	(CONT),A	; out of reset
+ 555: 2406+10	82AB  C9      		RET
+ 556:				;
+ 557:				;  This routine will wait for a for the FDC to go not busy, showing
+ 558:				;  completion of a command.  After 1 seconds time out, a FORCE INTERRUPT
+ 559:				;  command will be issued to the FDC.  Routines will come through here
+ 560:				;  at least 5 times before final error occures.  Total time out 5 seconds.
+ 561:				;
+ 562:     -	82AC          	FDWAIT:
+ 563: 2416+10	82AC  21DD84  		LD	HL,TIMEOUT	; Point to timeout location
+ 564: 2426+10	82AF  3603    		LD	(HL),3		; Set major loops for timeout 
+ 565:								; 3 = about 1 sec.
+ 566: 2436+11	82B1  DBC4    	DLOOP:	IN	A,(STAT)	; Get FDC status
+ 567: 2447+4	82B3  1F      		RRA			; test busy bit
+ 568: 2451+5+6	82B4  D0      		RET	NC		; .  zero status if busy non-active
+ 569: 2456+4	82B5  1F      		RRA			; see if byte to be read
+ 570: 2460+10	82B6  DAD082  		JP	C,FREAD		; read the byte
+ 571: 2470+6	82B9  2B      		DEC	HL		; See if enough minor loops
+ 572: 2476+4	82BA  7C      		LD	A,H		; .  (Approx 34,000 times)
+ 573: 2480+4	82BB  B5      		OR	L		; .
+ 574: 2484+10	82BC  C2B182  		JP	NZ,DLOOP	; Not done with minor loop
+ 575: 2494+10	82BF  21DD84  		LD	HL,TIMEOUT	; Decrement major loop counter
+ 576: 2504+11	82C2  35      		DEC	(HL)		; .  (timeout loop count)
+ 577: 2515+10	82C3  C2B182  		JP	NZ,DLOOP	; .
+ 578: 2525+17	82C6  CD5082  		CALL	FDCLR		; force fdc clear
+ 579: 2542+7	82C9  3E40    		LD	A,ROMOFF	; delect floppies so floppy select
+ 580: 2549+11	82CB  D300    		OUT	(CONT),A	; light will go out
+ 581: 2560+4	82CD  AF      		XOR	A		; Set A to 0FFH and status to NZ
+ 582: 2564+4	82CE  3D      		DEC	A		; 
+ 583: 2568+10	82CF  C9      		RET			; 
+ 584:				;
+ 585: 2578+11	82D0  DBC7    	FREAD:	IN	A,(RDAT)	; get the data byte from the fdc
+ 586: 2589+10	82D2  C3B182  		JP	DLOOP		; just loop till command over
+ 587:				;
+ 588:				; timer entered with 'a' equal to number of major loops wanted
+ 589:				; each major loop = aprox .25 sec
+ 590:				;
+ 591: 2599+10	82D5  21DD84  	TIMER:	LD	HL,TIMEOUT
+ 592: 2609+7	82D8  77      		LD	(HL),A		; save major loop value
+ 593: 2616+10	82D9  21C4A2  	TIMER0:	LD	HL,41668
+ 594: 2626+6	82DC  2B      	TIMER1:	DEC	HL		; 1.5
+ 595: 2632+4	82DD  7D      		LD	A,L		; 1.0
+ 596: 2636+4	82DE  B4      		OR	H		; 1.0
+ 597: 2640+10	82DF  C2DC82  		JP	NZ,TIMER1	; 2.5
+ 598:								; Total =  6 usec X 41668
+ 599: 2650+10	82E2  21DD84  		LD	HL,TIMEOUT
+ 600: 2660+11	82E5  35      		DEC	(HL)
+ 601: 2671+5+6	82E6  C8      		RET	Z
+ 602: 2676+10	82E7  C3D982  		JP	TIMER0
+ 603:				;
+ 604:				;---------------------------------------------------------------
+ 605:				; Send bytes to console until zero encountered
+ 606:				; use to insert messages when debuging
+ 607:				; format is
+ 608:				;	call	puts
+ 609:				;	db	'your message',0; must terminate with '0'
+ 610:				;
+ 611:				;PUTS:	pop	h		; 'hl' has address of msg
+ 612:				;	mov	c,m		; get char
+ 613:				;	inx	h
+ 614:				;CONOUT:
+ 615:				;	MVI	A,01H		; Check "all sent" bit in register 1
+ 616:				;	OUT	84H		; .
+ 617:				;	IN	84H		; .
+ 618:				;	ANI	01H		; "ALL SENT" is bit 0
+ 619:				;	JZ	CONOUT		;TRANSMIT BUFFER NOT READY
+ 620:				;	MOV	A,C		;CHARACTER TO REGISTER A
+ 621:				;	OUT	80H
+ 622:				;	mov	a,m
+ 623:				;	ana	a		; returns with char in 'a', null = end
+ 624:				;	jnz	puts+1
+ 625:				;	pchl			; hl has return address
+ 626:				;-----------------------------------------------------------------
+ 627:				;
+ 628:				; if no boot sector is present on the floppy disk, floppy timeout
+ 629:				; has occured, floppy read error, or no floppy disk controller is 
+ 630:				; present, entry to the hard disk (scsi) driver is here. 
+ 631:				; 
+ 632:				; starts with 5 second timer to prevent hammering the scsi buss 
+ 633:				; with possible scsi resets.
+ 634:				;
+ 635:     -	82EA          	TRY$HD$DVR:
+ 636: 2686+7	82EA  3E14    		LD	A,20		; 20 x .25 seconds = 5 sec
+ 637: 2693+17	82EC  CDD582  		CALL	TIMER
+ 638:				;
+ 639:				;  Hard disk driver
+ 640:				;
+ 641: 2710+10	82EF  310090  	HD$DVR:	LD	SP,STACK	; reset stack
+ 642:				
+ 643: 2720+10	82F2  211683  		LD	HL,HDTRK
+ 644: 2730+16	82F5  221380  		LD	(BOOT+19),HL	; patch readtrk
+ 645: 2746+4	82F8  AF      		XOR	A		; zero 'a'
+ 646: 2750+10	82F9  210090  		LD	HL,RAM		; address to read sector
+ 647: 2760+7	82FC  77      		LD	(HL),A		; clear anything at this address 
+ 648: 2767+13	82FD  32E184  		LD	(HDSECT),A	; zero hard disk sector
+ 649: 2780+16	8300  221E80  		LD	(DMAADR),HL
+ 650: 2796+17	8303  CD4E83  		CALL	SCSI$RD		; read boot sector
+ 651: 2813+13	8306  3A0090  		LD	A,(RAM)
+ 652: 2826+7	8309  FE21    		CP	21H		; should be lxi h,xxxx
+ 653: 2833+10	830B  CA0090  		JP	Z,RAM
+ 654: 2843+7	830E  FE3E    		CP	3EH		; other choice is mvi a,xx
+ 655: 2850+10	8310  CA0090  		JP	Z,RAM
+ 656: 2860+10	8313  C38E82  		JP	ERROR1		; no boot sector go try floppy again
+ 657:				;
+ 658:				; Read hard disk system to memory. Do 16 sectors at a time. One AMPRO
+ 659:				; hd track. The boot loader will call this routine twice.
+ 660:				; First pass read sectors 0 thru 15, second pass read 16 thru 31 for
+ 661:				; 32 sectors total.
+ 662:				;
+ 663: 2870+17	8316  CD4E83  	HDTRK:	CALL	SCSI$RD
+ 664: 2887+7	8319  FEFF    		CP	0FFH
+ 665: 2894+10	831B  CA8E82  		JP	Z,ERROR1	; if return has timeout error start all over
+ 666: 2904+16	831E  2A1E80  		LD	HL,(DMAADR)
+ 667: 2920+10	8321  110002  		LD	DE,512		; update dma address
+ 668: 2930+11	8324  19      		ADD	HL,DE
+ 669: 2941+16	8325  221E80  		LD	(DMAADR),HL
+ 670: 2957+13	8328  3AE184  		LD	A,(HDSECT)	; see if two tracks (32 sectors)
+ 671: 2970+4	832B  3C      		INC	A		; next sector to read
+ 672: 2974+7	832C  FE20    		CP	32		; have already read 512x32 bytes
+ 673: 2981+5+6	832E  C8      		RET	Z		; 
+ 674: 2986+7	832F  FE10    		CP	16		; see if one "track" has been read
+ 675: 2993+13	8331  32E184  		LD	(HDSECT),A	; update sector new sector, the boot
+ 676:								; loader reads two tracks.
+ 677: 3006+5+6	8334  C8      		RET	Z		; return to boot
+ 678: 3011+10	8335  C31683  		JP	HDTRK		; loop till through
+ 679:				;
+ 680:				;
+ 681:				;  SCSI return sense data command (Cmd 03)
+ 682:				;
+ 683:				
+ 684:     -	8338          	SCSI$STAT$CMD:
+ 685:     -	8338  03      		DEFB	3		; 00 - REQUEST SENSE COMMAND
+ 686:     -	8339  00      		DEFB	0		; 01 - LOGICAL UNIT
+ 687:     -	833A  00      		DEFB	0		; 02 - RESERVED
+ 688:     -	833B  00      		DEFB	0		; 03 - RESERVED
+ 689:     -	833C  04      		DEFB	4		; 04 - NUMBER OF BYTES
+ 690:     -	833D  00      		DEFB	0		; 05 - RESERVED
+ 691:				
+ 692:				;
+ 693:				;  SCSI read/write command (Cmd 08/0A)
+ 694:				;
+ 695:				
+ 696:     -	0008          	SCSI$RD$CMD EQU	08H		; 08 IS READ DATA
+ 697:				
+ 698:     -	833E          	SCSI$RW$CMD:
+ 699:     -	833E  08      		DEFB	SCSI$RD$CMD	; 00 - 08=Read, 0A=Write
+ 700:     -	833F          	HIGH$ADDR:
+ 701:     -	833F  00      		DEFB	0		; 01 - High address
+ 702:     -	8340          	MED$ADDR:
+ 703:     -	8340  00      		DEFB	0		; 02 - Middle address
+ 704:     -	8341          	LOW$ADDR:
+ 705:     -	8341  00      		DEFB	0		; 03 - Low address
+ 706:     -	8342  01      		DEFB	1		; 04 - Number of sectors
+ 707:     -	8343          	STEP$RATE:
+ 708:     -	8343  00      		DEFB	0		; 05 - Step rate (Xebec)
+ 709:				
+ 710:				
+ 711:				;
+ 712:				;  Init scsi controller prameters
+ 713:				;
+ 714:				;  When called  HL = address of scsi command
+ 715:				;               DE = address of prameter table
+ 716:				;
+ 717:     -	8344          	SETPRAM:
+ 718: 3021+16	8344  22E484  		LD	(CMDPTR),HL	; set address of scsi command
+ 719: 3037+4	8347  EB      		EX	DE,HL		; 'de' to 'hl'
+ 720: 3041+16	8348  22E284  		LD	(DATPTR),HL	; save address of parameters to pass
+ 721: 3057+10	834B  C35783  		JP	SCSICMD
+ 722:				;
+ 723:				;  Read from the hard disk
+ 724:				;
+ 725:     -	834E          	SCSI$RD:
+ 726: 3067+10	834E  213E83  		LD	HL,SCSI$RW$CMD	; Get command string
+ 727: 3077+16	8351  22E484  		LD	(CMDPTR),HL	; Save the command pointer
+ 728: 3093+17	8354  CDA083  		CALL	BLD$SCSI$SCTR	; Build SCSI sector address
+ 729:				;
+ 730:				;  Exits with status in flags.  Z = timeout error
+ 731:				;
+ 732:     -	8357          	SCSICMD:
+ 733: 3110+10	8357  21DA84  		LD	HL,INT$RETRIES	; set up retry count
+ 734: 3120+10	835A  3602    		LD	(HL),2
+ 735:				
+ 736:     -	835C          	SCSICMDRETRY:
+ 737: 3130+17	835C  CDA783  		CALL	SELECT		; Perform the SCSI operation
+ 738: 3147+13	835F  3A2980  		LD	A,(STATUS)	; Get the return status
+ 739: 3160+13	8362  32E084  		LD	(ERFLAG),A	; save error
+ 740: 3173+7	8365  FEFF    		CP	0FFH		; Timeout?
+ 741: 3180+10	8367  CA9E83  		JP	Z,SCSI$DONE	; Yes, go save timeout status
+ 742: 3190+7	836A  E602    		AND	2		; Check for SCSI error status
+ 743: 3197+5+6	836C  C8      		RET	Z		; No error -- return
+ 744:				
+ 745: 3202+10	836D  21DA84  		LD	HL,INT$RETRIES	; see if any retries remain
+ 746: 3212+11	8370  35      		DEC	(HL)
+ 747: 3223+10	8371  CA9E83  		JP	Z,SCSI$DONE	; NO more remain, exit and set flags
+ 748:				
+ 749:				; Save current command and data pointers
+ 750:				
+ 751: 3233+16	8374  2A1E80  		LD	HL,(DMAADR)
+ 752: 3249+16	8377  22EB84  		LD	(SAVE$DMA),HL	; save old data pointer
+ 753: 3265+16	837A  2AE484  		LD	HL,(CMDPTR)
+ 754: 3281+16	837D  22ED84  		LD	(SAVE$CMDPTR),HL ; save old command pointer
+ 755:				
+ 756:				; Request SCSI sense.
+ 757:				
+ 758: 3297+10	8380  21E684  		LD	HL,MESSAGE	; .  for request sense command
+ 759: 3307+16	8383  221E80  		LD	(DMAADR),HL
+ 760: 3323+10	8386  213883  		LD	HL,SCSI$STAT$CMD ; Set up data and command pointers
+ 761: 3333+16	8389  22E484  		LD	(CMDPTR),HL
+ 762: 3349+17	838C  CDA783  		CALL	SELECT		; Execute request sense command
+ 763:				
+ 764:				; Restore pointers and retry command
+ 765:				
+ 766: 3366+16	838F  2AEB84  		LD	HL,(SAVE$DMA)	; restore old data pointer
+ 767: 3382+16	8392  221E80  		LD	(DMAADR),HL
+ 768: 3398+16	8395  2AED84  		LD	HL,(SAVE$CMDPTR) ; restore old command pointer
+ 769: 3414+16	8398  22E484  		LD	(CMDPTR),HL
+ 770: 3430+10	839B  C35C83  		JP	SCSICMDRETRY	; command retry
+ 771:				
+ 772:     -	839E          	SCSI$DONE:
+ 773: 3440+4	839E  B7      		OR	A		; Set Z/NZ for user
+ 774: 3444+10	839F  C9      		RET			; and return
+ 775:				;
+ 776:				;
+ 777:				;  Build 2-byte SCSI sector number starting with 00
+ 778:				;
+ 779:				;  NOTE:  This routine uses only a block number starting with 00
+ 780:				;         and reads a maximum of ffh sectors.
+ 781:				;
+ 782:     -	83A0          	BLD$SCSI$SCTR:
+ 783: 3454+13	83A0  3AE184  		LD	A,(HDSECT)
+ 784: 3467+13	83A3  324183  		LD	(LOW$ADDR),A
+ 785: 3480+10	83A6  C9      		RET
+ 786:				;
+ 787:				;  Select controller, and fall through to phase if selected ok.
+ 788:				;
+ 789:     -	0040          	BUSBSY	EQU	40H
+ 790:				
+ 791: 3490+4	83A7  AF      	SELECT:	XOR	A
+ 792: 3494+11	83A8  D321    		OUT	(NCRICR),A	; Clear initiator command register
+ 793: 3505+11	83AA  D323    		OUT	(NCRTCR),A	; .  and target command register
+ 794:				
+ 795:     -	83AC          	CLEAR$ARBIT:
+ 796: 3516+4	83AC  AF      		XOR	A
+ 797: 3520+11	83AD  D322    		OUT	(NCRMR),A	; .
+ 798: 3531+11	83AF  DB27    		IN	A,(NCRRPI)	; reset interrupts
+ 799:				
+ 800:     -	83B1          	ARBITRATE:
+ 801: 3542+13	83B1  3ADE84  		LD	A,(MYID)	; Assert my ID (the initiator)
+ 802: 3555+11	83B4  D320    		OUT	(NCRODR),A	; .
+ 803: 3566+7	83B6  3E01    		LD	A,1		; start arbitration
+ 804: 3573+11	83B8  D322    		OUT	(NCRMR),A	; .
+ 805:				
+ 806:     -	83BA          	IN$PROGRESS:
+ 807: 3584+11	83BA  DB21    		IN	A,(NCRICR)	; Wait for "arbitration in 
+ 808: 3595+7	83BC  E640    		AND	40H		; .  progress" bit
+ 809: 3602+10	83BE  C2CB83  		JP	NZ,WONARBITRATE ; we have arbitration
+ 810: 3612+11	83C1  DB25    		IN	A,(NCRBSR)
+ 811: 3623+7	83C3  E610    		AND	10H		; see if scsi reset has occured 
+ 812: 3630+10	83C5  CABA83  		JP	Z,IN$PROGRESS
+ 813: 3640+10	83C8  C3AC83  		JP	CLEAR$ARBIT
+ 814:				
+ 815:     -	83CB          	WONARBITRATE:
+ 816: 3650+13	83CB  3ADE84  		LD	A,(MYID)
+ 817: 3663+4	83CE  47      		LD	B,A
+ 818: 3667+11	83CF  DB20    		IN	A,(NCRCSD)	; See if we're the highest priority
+ 819: 3678+4	83D1  90      		SUB	B		; .  remove my addr
+ 820: 3682+4	83D2  90      		SUB	B		; .  compare my addr to bus data
+ 821: 3686+10	83D3  FAD983  		JP	M,I$WIN		; We win if result < 0
+ 822: 3696+10	83D6  C3AC83  		JP	CLEAR$ARBIT	; .  otherwise we lose -- start over
+ 823:				
+ 824: 3706+11	83D9  DB21    	I$WIN:	IN	A,(NCRICR)	; Check again for lost arbitration
+ 825: 3717+7	83DB  E620    		AND	20H		; .  (just in case)
+ 826: 3724+10	83DD  C2AC83  		JP	NZ,CLEAR$ARBIT	; We lost -- start over
+ 827:				
+ 828:				
+ 829: 3734+7	83E0  3E08    		LD	A,08H		; Set assert BSY bit in ICR
+ 830: 3741+11	83E2  D321    		OUT	(NCRICR),A	; .
+ 831: 3752+11	83E4  DB22    		IN	A,(NCRMR)	; Reset arbitration bit
+ 832: 3763+7	83E6  E6FE    		AND	0FEH		; .
+ 833: 3770+11	83E8  D322    		OUT	(NCRMR),A	; .
+ 834:				
+ 835: 3781+11	83EA  DB21    		IN	A,(NCRICR)	; OR in SEL to ICR
+ 836: 3792+7	83EC  F604    		OR	04H
+ 837: 3799+11	83EE  D321    		OUT	(NCRICR),A
+ 838:				
+ 839: 3810+13	83F0  3ADE84  		LD	A,(MYID)	; Select target: get our ID,
+ 840: 3823+4	83F3  47      		LD	B,A		; .
+ 841: 3827+13	83F4  3ADF84  		LD	A,(TARGET)	; .  or in target ID
+ 842: 3840+4	83F7  B0      		OR	B		; .
+ 843: 3844+11	83F8  D320    		OUT	(NCRODR),A	; .  and send to NCR chip
+ 844:				
+ 845: 3855+11	83FA  DB21    		IN	A,(NCRICR)
+ 846: 3866+7	83FC  F601    		OR	01H		; Assert data bus
+ 847: 3873+11	83FE  D321    		OUT	(NCRICR),A	; .
+ 848:				
+ 849: 3884+7	8400  3E05    		LD	A,05H		; Release BSY, keep SEL
+ 850: 3891+11	8402  D321    		OUT	(NCRICR),A	; .  and assert data bus
+ 851:				
+ 852: 3902+10	8404  010060  		LD	BC,6000H	; 250 ms loop (1M cycles)
+ 853:				
+ 854:     -	8407          	STIM:
+ 855: 3912+11	8407  DB24    		IN	A,(NCRCSBS)	; Wait for BSY
+ 856: 3923+7	8409  E640    		AND	BUSBSY		; .
+ 857: 3930+10	840B  C22084  		JP	NZ,SELECT$OK	; Got him!
+ 858:				
+ 859: 3940+4	840E  0D      		DEC	C
+ 860: 3944+10	840F  C20784  		JP	NZ,STIM		; inner loop:  41*256 = 10496 cycles
+ 861: 3954+4	8412  05      		DEC	B
+ 862: 3958+10	8413  C20784  		JP	NZ,STIM		; outer loop: 10510*96 = 1M cycles
+ 863:				
+ 864: 3968+4	8416  AF      		XOR	A		; Select timeout -- clear bus
+ 865: 3972+11	8417  D320    		OUT	(NCRODR),A
+ 866:				
+ 867: 3983+4	8419  3D      		DEC	A		; set 'a' to 0ffh
+ 868: 3987+13	841A  322980  		LD	(STATUS),A	; Save status timeout.
+ 869: 4000+10	841D  C32184  		JP	ALL$DONE	; and clear the registers
+ 870:				
+ 871:     -	8420          	SELECT$OK:
+ 872: 4010+4	8420  AF      		XOR	A		; Set good status
+ 873:				
+ 874:     -	8421          	ALL$DONE:
+ 875: 4014+4	8421  47      		LD	B,A		; save status
+ 876: 4018+7	8422  3E01    		LD	A,01H		; Release SEL
+ 877: 4025+11	8424  D321    		OUT	(NCRICR),A	; .
+ 878: 4036+4	8426  AF      		XOR	A		; Release data bus
+ 879: 4040+11	8427  D321    		OUT	(NCRICR),A	; .
+ 880: 4051+4	8429  78      		LD	A,B		; Get status back
+ 881: 4055+4	842A  B7      		OR	A		; Set status
+ 882: 4059+5+6	842B  C0      		RET	NZ
+ 883: 4064+4	842C  3D      		DEC	A		; set 'a' to ffh
+ 884: 4068+13	842D  322980  		LD	(STATUS),A	; clear scsi status to timeout..
+ 885:				
+ 886:				; SCSI.011
+ 887:				
+ 888:				; * * * * *  
+ 889:				; *  --------\	NOTE: we fall through if we successfully
+ 890:				; *  --------/	selected the controller!!
+ 891:				; * * * * *
+ 892:				
+ 893: 4081+7	8430  3E06    		LD	A,00000110B	; Set DMA mode and Monitor Busy  
+ 894: 4088+11	8432  D322    		OUT	(NCRMR),A	; .
+ 895:				
+ 896:     -	8434          	SCSI$RDY:
+ 897:				; Wait for either a 5380 "Interrupt" or a REQ from Target.
+ 898:				; The REQ is needed since it may have come too soon after
+ 899:				; selection to register an Interrupt.
+ 900: 4099+11	8434  DB25    		IN	A,(NCRBSR)	; Check for "Interrupt"
+ 901: 4110+7	8436  E610    		AND	00010000B	; .
+ 902: 4117+10	8438  C24584  		JP	NZ,SCSI$INT
+ 903: 4127+11	843B  DB24    		IN	A,(NCRCSBS)	; Check for REQ
+ 904: 4138+7	843D  E620    		AND	NCRREQ		; .
+ 905: 4145+10	843F  CA3484  		JP	Z,SCSI$RDY	; Wait for Interrupt or REQ
+ 906: 4155+10	8442  C34F84  		JP	PHASE		; Process phase vector
+ 907:				
+ 908:     -	8445          	SCSI$INT:
+ 909:				;  Determine cause of 5380 "Interrupt".  Either phase
+ 910:				;  changed, busy dropped, or bus was reset.  If bits 2 and 3
+ 911:				;  of the NCRBSR are not 0's when the Interrupt flag (bit 4)
+ 912:				;  is set, then it is either a loss of BUSY or an SCSI RESET.
+ 913: 4165+4	8445  AF      		XOR	A
+ 914: 4169+11	8446  D321    		OUT	(NCRICR),A	; Release data bus
+ 915: 4180+11	8448  DB25    		IN	A,(NCRBSR)	; Read 5380 Bus and Stat Reg
+ 916: 4191+7	844A  E60C    		AND	00001100B	; Keep interesting bits
+ 917: 4198+10	844C  C29C84  		JP	NZ,SCSI$EXIT	; Reset or Busy Loss: Exit
+ 918:								; 00 --> Process phase vector
+ 919:				
+ 920:     -	844F          	PHASE:
+ 921:				; DMA mode and Monitor Busy must be cleared prior to clearing
+ 922:				; of the 5380 Interrupt Flag.  Then mode register is restored.
+ 923:				; Otherwise the interrupt flag may not clear and the DMA Mode 
+ 924:				; may not be useable.  
+ 925: 4208+4	844F  AF      		XOR	A		; Clear 5380 Mode Register
+ 926: 4212+11	8450  D322    		OUT	(NCRMR),A	; .
+ 927: 4223+11	8452  DB27    		IN	A,(NCRRPI)	; Reset interrupts
+ 928: 4234+7	8454  3E06    		LD	A,00000110B	; Set DMA mode and Monitor Busy
+ 929: 4241+11	8456  D322    		OUT	(NCRMR),A	; .
+ 930: 4252+11	8458  DB24    		IN	A,(NCRCSBS)	; Update phase...
+ 931: 4263+7	845A  E61C    		AND	00011100B	; Mask all but phase bits, clear carry bit
+ 932: 4270+4	845C  1F      		RRA			; Rotate over for target
+ 933: 4274+4	845D  5F      		LD	E,A		; . (Save for use with jump table)
+ 934: 4278+4	845E  1F      		RRA			; .
+ 935: 4282+11	845F  D323    		OUT	(NCRTCR),A	; Set phase
+ 936: 4293+7	8461  1600    		LD	D,0		; E is already set (6 ins ago)
+ 937: 4300+10	8463  216E84  		LD	HL,PHASE$TABLE	; Get phase jump table base
+ 938: 4310+11	8466  19      		ADD	HL,DE		; Add offset for this phase
+ 939: 4321+7	8467  7E      		LD	A,(HL)		; Get phase pointer into HL
+ 940: 4328+6	8468  23      		INC	HL		; .
+ 941: 4334+7	8469  66      		LD	H,(HL)		; .
+ 942: 4341+4	846A  6F      		LD	L,A		; Pointer is now together
+ 943: 4345+7	846B  1640    		LD	D,01000000B	; DMA request mask (used by RSCSI and WRSCSI)
+ 944: 4352+4	846D  E9      		JP	(HL)		; Go to it!
+ 945:				
+ 946:     -	846E          	PHASE$TABLE:
+ 947:     -	846E  7E84    		DEFW	PHASE0
+ 948:     -	8470  8484    		DEFW	PHASE1
+ 949:     -	8472  8A84    		DEFW	PHASE2
+ 950:     -	8474  9084    		DEFW	PHASE3
+ 951:     -	8476  9C84    		DEFW	PHASE4
+ 952:     -	8478  9C84    		DEFW	PHASE5
+ 953:     -	847A  9C84    		DEFW	PHASE6
+ 954:     -	847C  9684    		DEFW	PHASE7
+ 955:				
+ 956:     -	847E          	PHASE0:				; Data out phase
+ 957: 4356+16	847E  2AE284  		LD	HL,(DATPTR)	; to pass parameters to scsi controller
+ 958: 4372+10	8481  C3A484  		JP	WSCSI		; Execute SCSI write routine
+ 959:				
+ 960:     -	8484          	PHASE1:				; Data in phase ...
+ 961: 4382+16	8484  2A1E80  		LD	HL,(DMAADR)	; Use data pointer
+ 962: 4398+10	8487  C3C184  		JP	RSCSI		; Execute SCSI read routine
+ 963:				
+ 964:     -	848A          	PHASE2:				; Command out phase ...
+ 965: 4408+16	848A  2AE484  		LD	HL,(CMDPTR)	; Use command pointer
+ 966: 4424+10	848D  C3A484  		JP	WSCSI		; Execute SCSI write routine
+ 967:				
+ 968:     -	8490          	PHASE3:				; Status in phase ...
+ 969: 4434+10	8490  212980  		LD	HL,STATUS	; Use status pointer
+ 970: 4444+10	8493  C3C184  		JP	RSCSI		; Execute SCSI read routine
+ 971:				
+ 972:     -	8496          	PHASE7:				; Message in phase ...
+ 973: 4454+10	8496  21E684  		LD	HL,MESSAGE	; Use message pointer
+ 974: 4464+10	8499  C3C184  		JP	RSCSI		; Execute SCSI read routine
+ 975:				
+ 976:				; Currently unused phases
+ 977:				
+ 978:     -	849C          	PHASE4:
+ 979:     -	849C          	PHASE5:
+ 980:     -	849C          	PHASE6:
+ 981:     -	849C          	SCSI$EXIT:
+ 982: 4474+4	849C  AF      		XOR	A		; clean up 5380 and exit
+ 983: 4478+11	849D  D323    		OUT	(NCRTCR),A	; .
+ 984: 4489+11	849F  D322    		OUT	(NCRMR),A	; .
+ 985: 4500+11	84A1  DB27    		IN	A,(NCRRPI)	; reset unterrupts
+ 986: 4511+10	84A3  C9      		RET			; .
+ 987:				
+ 988:				; Generalized SCSI write routine
+ 989:				
+ 990:     -	84A4          	WSCSI:
+ 991: 4521+7	84A4  3E01    		LD	A,1		; Assert data bus
+ 992: 4528+11	84A6  D321    		OUT	(NCRICR),A
+ 993: 4539+11	84A8  D325    		OUT	(NCRSDS),A	; Start DMA send
+ 994:				
+ 995:				; Wait for DMA request, keeping an eye on phase.  Note that the NCR
+ 996:				; will not issue an ACK, nor will it generate DMA requests once the
+ 997:				; phase changes, so it is best to treat DMA request checking as a
+ 998:				; higher priority than phase change checking.
+ 999:				
+1000:     -	84AA          	WSCSI1:
+1001: 4550+11	84AA  DB25    		IN	A,(NCRBSR)
+1002: 4561+4	84AC  47      		LD	B,A		; Save status for use below
+1003: 4565+4	84AD  A2      		AND	D		; Check for DMA request
+1004: 4569+10	84AE  CAB884  		JP	Z,WSCSI2
+1005: 4579+7	84B1  7E      		LD	A,(HL)
+1006: 4586+11	84B2  D328    		OUT	(NCRDACK),A
+1007: 4597+6	84B4  23      		INC	HL
+1008: 4603+10	84B5  C3AA84  		JP	WSCSI1		; Write more bytes until phase changes
+1009:				;
+1010:				; This code skipped when data is being transferred ...
+1011:				;
+1012:     -	84B8          	WSCSI2:
+1013: 4613+4	84B8  78      		LD	A,B		; Check 5380 "interrupt" flag
+1014: 4617+7	84B9  E610    		AND	00010000B	; .
+1015: 4624+10	84BB  CAAA84  		JP	Z,WSCSI1	; Wait for DMA request,
+1016: 4634+10	84BE  C34584  		JP	SCSI$INT	;  or Process "interrupt"
+1017:				
+1018:				; Generalized SCSI read routine
+1019:				
+1020:     -	84C1          	RSCSI:
+1021:				; Initiator command reg is already ininialized by phase
+1022:				
+1023: 4644+11	84C1  D327    		OUT	(NCRSDIR),A	; Start DMA initiator receive
+1024:				
+1025:				; Wait for DMA request, keeping an eye on phase.  Note: we must do
+1026:				; a check for DMA request before checking for a phase change, since
+1027:				; a byte may be queued up waiting to be DACKed prior to the phase
+1028:				; change.
+1029:				;
+1030:     -	84C3          	RSCSI1:
+1031: 4655+11	84C3  DB25    		IN	A,(NCRBSR)
+1032: 4666+4	84C5  47      		LD	B,A		; Keep for phase change checking
+1033: 4670+4	84C6  A2      		AND	D		; Mask for DMA request
+1034: 4674+10	84C7  CAD184  		JP	Z,RSCSI2
+1035:				
+1036:				;
+1037:				; All transfer is one byte at a time
+1038:				; 
+1039: 4684+11	84CA  DB28    		IN	A,(NCRDACK)
+1040: 4695+7	84CC  77      		LD	(HL),A
+1041: 4702+6	84CD  23      		INC	HL
+1042: 4708+10	84CE  C3C384  		JP	RSCSI1		; Read until phase changes
+1043:				
+1044:				; This code skipped when data is being transferred ...
+1045:     -	84D1          	RSCSI2:
+1046: 4718+4	84D1  78      		LD	A,B		; Check phase
+1047: 4722+7	84D2  E610    		AND	00010000B	; .
+1048: 4729+10	84D4  CAC384  		JP	Z,RSCSI1	; Wait for DMA request
+1049: 4739+10	84D7  C34584  		JP	SCSI$INT	; Process "interrupt" flag
+1050:				;
+1051:				; Tempory storage
+1052:				;
+1053:     -	84DA          	INT$RETRIES:
+1054:     -	84DA  05      		DEFB	5		; number of retries
+1055:     -	84DB  0000    	DMA:	DEFW	0		; save for dma address
+1056:     -	84DD  00      	TIMEOUT:DEFB	0
+1057:     -	84DE  00      	MYID:	DEFB	0
+1058:     -	84DF  00      	TARGET:	DEFB	0
+1059:     -	84E0  00      	ERFLAG:	DEFB	0
+1060:     -	84E1  00      	HDSECT:	DEFB	0
+1061:     -	84E2  0000    	DATPTR:	DEFW	0
+1062:     -	84E4  0000    	CMDPTR:	DEFW	0
+1063:     -	84E6  00000000	MESSAGE:DEFW	0,0
+1064:     -	84EA  00      	SCSI:	DEFB	0
+1065:     -	84EB          	SAVE$DMA:
+1066:     -	84EB  0000    		DEFW	0
+1067:     -	84ED          	SAVE$CMDPTR:
+1068:     -	84ED  0000    		DEFW	0
+1069:				
+1070:     -	84EF          		END
+
+
+
+Statistics:
+
+     4	passes
+     0	jr promotions
+   172	symbols
+  1263	bytes
+
+
+
+Symbol Table:
+
+ALL$DONE        8421      33825
+ARBITRATE       83B1      33713
+BLD$SCSI$SCTR   83A0      33696
+BOOT           =8000      32768
+BUSBSY         =40        64
+CB0             814E      33102
+CBOOT           80DE      32990
+CBOOT2          8132      33074
+CL              8256      33366
+CLEAR$ARBIT     83AC      33708
+CLOOP           8120      33056
+CMDPTR          84E4      34020
+CMND           =C0        192
+CONT           =00        0
+CR             =0D        13
+CTCA           =40        64
+CTCA0          =40        64
+CTCA1          =50        80
+CTCA2          =60        96
+CTCA3          =70        112
+CTCINT          80B5      32949
+CTCTBL          80C3      32963
+DATPTR          84E2      34018
+DLOOP           82B1      33457
+DMA             84DB      34011
+DMAADR          801E      32798
+ERFLAG          84E0      34016
+ERMSK          =18        24
+ERROR           8277      33399
+ERROR0          82A3      33443
+ERROR1          828E      33422
+FDCLR           8250      33360
+FDCRESET        829E      33438
+FDWAIT          82AC      33452
+FI             =D0        208
+FREAD           82D0      33488
+HD$DVR          82EF      33519
+HDSECT          84E1      34017
+HDTRK           8316      33558
+HIGH$ADDR       833F      33599
+HOLDIT          80FE      33022
+I$WIN           83D9      33753
+ID             =29        41
+IDSV            8020      32800
+IN$PROGRESS     83BA      33722
+INITSYS         80AB      32939
+INT$RETRIES     84DA      34010
+LF             =0A        10
+LOW$ADDR        8341      33601
+MED$ADDR        8340      33600
+MESSAGE         84E6      34022
+MSEC           =A7        167
+MYID            84DE      34014
+NCRBASE        =20        32
+NCRBSR         =25        37
+NCRBSY         =40        64
+NCRCD          =08        8
+NCRCSBS        =24        36
+NCRCSD         =20        32
+NCRDACK        =28        40
+NCRDBP         =01        1
+NCRICR         =21        33
+NCRIDR         =26        38
+NCRIO          =04        4
+NCRMR          =22        34
+NCRMSG         =10        16
+NCRODR         =20        32
+NCRREQ         =20        32
+NCRRPI         =27        39
+NCRRST         =80        128
+NCRSDIR        =27        39
+NCRSDS         =25        37
+NCRSDTR        =26        38
+NCRSEL         =02        2
+NCRSER         =24        36
+NCRTCR         =23        35
+NO             =00        0
+OC0             8263      33379
+OUTCMD          825F      33375
+PHASE           844F      33871
+PHASE$TABLE     846E      33902
+PHASE0          847E      33918
+PHASE1          8484      33924
+PHASE2          848A      33930
+PHASE3          8490      33936
+PHASE4          849C      33948
+PHASE5          849C      33948
+PHASE6          849C      33948
+PHASE7          8496      33942
+RAM            =9000      36864
+RD              8220      33312
+RDAT           =C7        199
+RDID           =C8        200
+RDSEC          =88        136
+READID          81E0      33248
+READSEC         8206      33286
+READTRK         8190      33168
+RELOC           8036      32822
+RESETNOT        8108      33032
+REST           =08        8
+ROMOFF         =40        64
+RSAGN           81B1      33201
+RSAGN1          81C5      33221
+RSCSI           84C1      33985
+RSCSI1          84C3      33987
+RSCSI2          84D1      34001
+RSEC           =C6        198
+RTLOOP          819E      33182
+RTRK           =C5        197
+SAVE$CMDPTR     84ED      34029
+SAVE$DMA        84EB      34027
+SBIAS           802B      32811
+SCSI            84EA      34026
+SCSI$DONE       839E      33694
+SCSI$EXIT       849C      33948
+SCSI$INT        8445      33861
+SCSI$RD         834E      33614
+SCSI$RD$CMD    =08        8
+SCSI$RDY        8434      33844
+SCSI$RW$CMD     833E      33598
+SCSI$STAT$CMD   8338      33592
+SCSICMD         8357      33623
+SCSICMDRETRY    835C      33628
+SDEN           =20        32
+SECTOR          8028      32808
+SELBYT          8026      32806
+SELECT          83A7      33703
+SELECT$OK       8420      33824
+SETDMA          8268      33384
+SETID           80E6      32998
+SETPRAM         8344      33604
+SETUP           817E      33150
+SID1           =10        16
+SIDEONE         826F      33391
+SIO            =80        128
+SIOAC          =84        132
+SIOAD          =80        128
+SIOBC          =8C        140
+SIOBD          =88        136
+SIOINT          80CD      32973
+SIOLP           80D0      32976
+SIOTBL          80C6      32966
+SKWTBL          81CF      33231
+SKWTBL1         81DA      33242
+STACK          =9000      36864
+START           802C      32812
+STAT           =C4        196
+STATUS          8029      32809
+STEP$RATE       8343      33603
+STEPI          =58        88
+STEPIN          8230      33328
+STIM            8407      33799
+STLP            8249      33353
+STPI            8244      33348
+TARGET          84DF      34015
+TIMEOUT         84DD      34013
+TIMER           82D5      33493
+TIMER0          82D9      33497
+TIMER1          82DC      33500
+TRACK           8027      32807
+TRY$HD$DVR      82EA      33514
+TWOSID          802A      32810
+WAIT            8294      33428
+WDAT           =C3        195
+WONARBITRATE    83CB      33739
+WSCSI           84A4      33956
+WSCSI1          84AA      33962
+WSCSI2          84B8      33976
+WSEC           =C2        194
+WT              8297      33431
+WTRK           =C1        193
+YES            =01        1

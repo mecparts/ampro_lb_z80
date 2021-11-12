@@ -1,0 +1,1893 @@
+;         * * * * * * * * * * * * * * * * * * * * * * *
+;         *                                           *
+;         *        Hard Disk Auto-Boot Installer      *
+;         *                                           *
+;         *  Copyright (C) 1985 AMPRO Computers, Inc. *
+;         *             All rights reserved.          *
+;         *                                           *
+;         * * * * * * * * * * * * * * * * * * * * * * *
+;
+;
+;  Revision history:
+;
+;  Ver  Date      Who     Description
+;  ---  --------  ---     -----------------------------------------
+;
+;  1.3  9/1/21    swh     Reconstituted lost source code
+;
+;  1.3  11/2/88   swh     Store info for non generic SCSI controllers
+;                         to allow automatic booting from non generic
+;                         SCSI controllers
+;
+;  1.2  1/7/85    fsw     Installs users HD$ALV$AVAIL: information
+;                         in bios at boot time.
+;
+;  1.0  9/20/85   fsw	  Initial release.
+;
+;
+VERS    EQU     13			; version 1.3
+;
+; This version saves all the setup disk parameters that the user
+; has defined by running SYSGEN, HINIT, and SWAP to the hard disk.
+; This user defined information is stored on the last sector (sector 31)
+; of the system track, and is used to "patch" the standard BIOS on boot.
+;
+; The information on this sector will be read somewhere into memory
+; by the hard disk boot prom with an offset of 15872 bytes (3E00 hex)
+; from the boot dma address.  The user's dpbase (256 bytes), the 64 byte
+; PHYTAB with the user's logical/physical configuration, the user's
+; hard disk DBP's (176 bytes), the users HD$ALV$AVAIL block (12 bytes),
+; and the users hard disk byte/block flag (1 byte) are saved in that order.
+; (total 509 bytes)
+;
+; The boot loader is modified to find this offset and install the users
+; changes in bios and perform any required initialization for non generic
+; SCSI controllers before jumping to cold boot.
+;
+; NOTES:
+;
+;    Only the system track of the hard disk with SCSI id 0 and LUN 0 will
+;    be patched.
+;
+;    Only Little Board's jumpered for SCSI initiator id 7 can run this
+;    utility.
+;
+;    Sector 31 (1F hex) of the hard disk system track is reserved.
+;
+;    Requires v1.3 of the SCSI boot prom (1.2 had problems with the
+;    SETPRAM call, making WSCSI overwrite the contents of DATPTR when
+;    it was called, which created havoc when it came time to send the
+;    drive parameters to the controller.
+;
+;------------------------------------------------------------------------
+;
+; The following equates are entry points into the boot prom
+;
+SETDMA	EQU	800FH
+READTRK	EQU	8012H
+INITHDC	EQU	801BH
+;
+BOOT	EQU	9000H			; location of boot loader
+TPA	EQU	100H
+OFFSET	EQU	(BOOT-TPA)-3		; -3 for jmp start before patch area
+WBOOT	EQU	0			; location of bios warm boot
+;
+; Operating characteristics
+;
+MIN$VERSION EQU	31			; Minimum bios version allowed
+;
+CONTROL EQU     0			; board control port
+;
+SREAD   EQU     08H			; scsi read data
+SWRITE  EQU     0AH			; scsi write data
+;
+BDOS	EQU	5
+CMD$TAIL EQU	80H
+;
+LD$A$nn	EQU	3EH			; LD A,nn opcode
+LD$HL$nnnn EQU	21H			; LD HL,nnnn opcode
+;
+CTRLC	EQU	03H
+BS	EQU	08H
+TAB	EQU	09H
+CR	EQU	0DH
+LF	EQU	0AH
+FF	EQU	0CH
+ESC	EQU	1BH
+EOS	EQU	'$'
+; Current screen width and output buffer width
+SWIDTH	EQU	80			; Screen width
+PWIDTH	EQU	132			; Output buffer width
+;
+;-----------------------------------------
+;
+	ORG	TPA			; CP/M TPA
+	JP	START
+;
+;******************************************************************
+;************************Boot loader*******************************
+; values set at 0 are patched to users addresses by the program.
+;
+;
+PATCH$START:
+	LD	A,40H			; must turn off rom
+	OUT	(CONTROL),A
+DMA:	LD      HL,0			; set dmaadr address
+	CALL	SETDMA
+	CALL	READTRK			; read first track
+	CALL	READTRK			; read second track
+;
+; find the user disk information that was loaded in to memory
+; from sector 15 of the hard disk
+;
+	LD	HL,((DMA+1)+OFFSET)	; get load address
+	LD	DE,31*512		; offset to where hard disk sector 31
+					; landed
+	ADD	HL,DE			; source address in 'hl'
+;
+; move the users dpbase into bios
+;
+DDPBAS:	LD	DE,0			; patched to destination address
+	LD	BC,256			; number of bytes to move
+	LDIR
+;
+; move the users phytab into bios
+;
+DOPHY:	LD	DE,0			; patched to address of phytbl
+	LD	BC,64
+	LDIR
+;
+; move the users dpb's into bios
+;
+DODPB:  LD      DE,0			; patched to destination address
+	LD	BC,176			; size hard disk DPB's
+	LDIR
+;
+; move the users HD$ALV$AVAIL info into bios
+;
+HDAVL:  LD      DE,0			; patched to destination address
+	LD	BC,12			; bytes to move
+	LDIR
+;
+; move the users byte, block mode value to bios
+;
+CTLBYT: LD      DE,0			; patched to destination address
+	LD      A,(HL)			; 'hl' has location of byte
+	LD	(DE),A			; store at 'de' location
+;
+; Initialize SASI controller (patched to LD HL,mInitHDC for SCSI)
+;
+	LD	HL,INICMD+OFFSET	; point to SCSI command
+	LD	DE,INIDAT+OFFSET	; point to SCSI data
+PatchSCSI:
+	CALL	INITHDC			; patched SCSI call
+PatchBIOS:
+	JP	0			; patched cold boot
+;
+INICMD:	DS	6			; NOTE: must be as long as longest command
+INIDAT:	DS	10			; NOTE: must be as long as longest data
+;
+SIZE$PATCH EQU	$-PATCH$START
+;
+SCREEN$WIDTH:	DB	SWIDTH-1	; 1 less than actual #
+SLOW$TERM:	DB	10		; Delay (ms) for slow term
+CMD$LINE$CHRS:	DB	0		; # of cmd line chrs left
+CMD$LINE$PTR:	DW	0		; Ptr to next cmd line chr
+ZCPR3$TYPE:	DB	1 		; External ZCPR3 ENV
+ZCPR3$PTR:	DW	0FE00H		; Pointer to ZCPR3 ENV
+;
+NAME$MSG:
+	DB	CR,'Ampro '
+NAME:
+	DB	'Hard Disk Auto-Boot Installer'
+	DB	0
+	DB	' Utility'
+	DB	CR,LF
+	DB	'Copyright (C) 1985 AMPRO Computers, Inc.',CR,LF
+	DB	'Version 1.3',CR,LF,LF,EOS
+L01CB:
+	DB	CR
+INTRO$MSG:
+	DB	'This utility will install your current hard disk'
+	DB	' configuration on the system tracks of the SCSI hard disk'
+	DB	' drive located at SCSI ID 0, LUN 0. It will also perform'
+	DB	' controller initialization for non generic SCSI controller'
+	DB	' at boot up.',CR,LF,LF
+	DB	'Prior to using this program you must use SYSGEN to write'
+	DB	' the proper size CP/M system to the system tracks of the'
+	DB	' SCSI hard disk drive from which you will boot.  In addition,'
+	DB	' you must have already used the HINIT and SWAP utilities to'
+	DB	' customize your system.',CR,LF,LF
+	DB	'NOTE:  The CP/M system you install on the hard disk must'
+	DB	' identical to the system you are running now. ',CR,LF,LF
+	DB	'WARNING!!! ',CR,LF
+	DB	'As a safety measure, be sure to backup your hard disk before'
+	DB	' you perform this function or attempt hard disk'
+	DB	' auto-booting! ',CR,LF,LF,EOS
+BIOS$PLUS:
+	DB	CR
+OLD$BIOS$MSG:
+	DB	'This program requires AMPRO bios version 3.1 or later.'
+	DB	CR,LF,EOS
+	DB	CR,' ',CR,1AH
+;
+Start:
+	LD	HL,CMD$TAIL
+	LD	DE,INBUF
+	LD	BC,128
+	LDIR
+	LD	HL,INBUF
+	LD	A,(HL)
+	LD	(CMD$LINE$CHRS),A
+	INC	HL
+	LD	(CMD$LINE$PTR),HL
+	LD	SP,STACK
+	CALL	GET$BIOS$VERS
+	LD	HL,BTSEC
+	LD	BC,1024
+CLEAR:
+	XOR	A
+	LD	(HL),A
+	INC	HL
+	DEC	BC
+	LD	A,B
+	OR	C
+	JP	NZ,CLEAR
+	IN	A,(29H)
+	AND	7
+	CP	7
+	JP	Z,SIGNON
+	ADD	A,'0'
+	LD	(SHID),A
+	LD	DE,BAD$ID$MSG
+	CALL	JUSTIFY$RAGGED
+	JP	ALL$DONE
+;
+; Check the version of the bios against the minimum version allowed.
+; If the bios is not at least the minimum, display an error message
+; and exit to the operating system.
+;
+SIGNON:
+	LD	A,(BIOS$VERSION)	; Get bios version #
+	CP	MIN$VERSION		; Check against minimum version
+	JR	NC,BIOS$VER$OK		; At least minimum version . . .
+	LD	DE,OLD$BIOS$MSG		; Not minimum, display error message
+	CALL	JUSTIFY			; .
+	JP	ALL$DONE		; and exit.
+;
+; Perform any initialization particular to each version of the Ampro
+; bios, if necessary.
+;
+BIOS$VER$OK:
+	LD	A,(BIOS$VERSION)	; Get current bios version
+	CP	30			; Is it version 3?
+	JR	C,CHECK2		; No, check for version 2
+					; Bios version 3 init code ...
+CHECK2:
+	CP	20			; Is it version 2?
+	JR	C,TOPMENU		; No, assume version 1
+					; Bios version 2 init code ...
+;
+; This is where you can jump to start the program over.
+;
+TOPMENU:
+	LD	SP,STACK		; Stuff SP with our stack.
+;
+; Display the name and signon message
+;
+	LD	A,(CMD$LINE$CHRS)	; Check for any input and skip
+	OR	A			; .  the initial messages if any
+	JR	NZ,SKIP$INTRO		; .  chrs in the cmd line.
+	
+	CALL	CLEAR$SCREEN		; Clear the screen
+	LD	DE,NAME$MSG		; Display the name, version, etc.
+	CALL	CENTER$OUTPUT		; .
+	LD	DE,INTRO$MSG		; and the initial message
+	CALL	JUSTIFY			; .
+SKIP$INTRO:
+	LD	DE,ASK$CONT$MSG		; ok to continue?
+	LD	HL,ASK$CONT$OKC
+	CALL	PROMPT
+	JP	Z,ALL$DONE
+	CP	'Y'
+	JP	NZ,ALL$DONE		; exits if input not Y 
+	CALL	DEFINE$CDRIVE		; Define "Current Drive"
+;
+; read the current boot sector into memory
+;
+	LD	A,SREAD			; SCSI read command
+	LD	(SCSICMD),A
+	LD	HL,SCSICMD		; point to SCSI command
+	LD	DE,BTSEC		; data area
+	LD	A,1			; target address
+	CALL	LB$SCSIDRV
+	JP	NZ,SCSIERR		; not zero results=error
+;
+; we have the boot sector in memory lets see if sysgen has been
+; done on the hard disk. two choices are present for the first byte
+; of the AMPRO boot sector either mvi a,xx or lxi h,xxxx , check for 
+; both.
+;
+	LD	A,(DE)			; call to SCSI returns data pointer
+	CP	LD$A$nn			; ; see if ld a,nn
+	JP	Z,NEXT
+	CP	LD$HL$nnnn		; could be ld hl,nnnn
+	JP	Z,NEXT
+	LD	DE,INV$BOOT$SCT$MSG	; neither
+	CALL	JUSTIFY$RAGGED		; no valid boot sector found
+	JP	ALL$DONE
+;
+; figure out the dma address to load track 0 at
+; the rest if the info we will find in the bios jmp table
+;
+NEXT:
+	LD	A,(DE)			; find the ld hl,nnnn instruction for
+	CP	LD$HL$nnnn		; dma address
+	INC	DE
+	JP	NZ,NEXT
+	EX	DE,HL			; location of dma address in 'hl'
+	LD	A,(HL)
+	INC	HL
+	LD	H,(HL)			; dma address in 'hl'
+	LD	L,A
+	LD	(DMA+1),HL		; set dma address in new boot loader
+;
+; fix the cold boot address
+;
+	LD	HL,(WBOOT+1)		; get address of warm boot from cp/m
+	LD	L,0			; make it a cold boot
+	LD	(PatchBIOS+1),HL	; patch jmp in boot loader
+;
+; get users dpbase, always at cold boot+80h in AMPRO bios
+;
+	LD	L,80H			; offset from cold boot
+	LD	(DDPBAS+1),HL		; load address in boot loader
+	LD	DE,UDPBASE		; move the dpbase to save area
+	LD	BC,256
+	LDIR
+	PUSH	DE			; save buffer destination address
+;
+; get address of phytbl
+;
+	LD	HL,0
+	CALL	LB$PHYTAB		; call phtbac
+	LD	(DOPHY+1),HL		; patch location of phytab in user's bios
+	POP	DE			; get destination address
+	LD	BC,64			; move 64 bytes
+	LDIR
+	PUSH	DE			; save address
+;
+; the patch area now contains the phytab as designated by the user.
+;
+; lets find the users DPB's for the hard disk. Test first to see 
+; if SWAP has been run
+;
+	LD	C,0			; drive 'A'
+	LD	E,1			; not first time select
+	CALL	LB$SELDSK		; do select to return dpb header address
+	LD	DE,10			; offset to dpb address
+	ADD	HL,DE
+	LD	A,(HL)			; get the address of the dpb in 'hl'
+	INC	HL
+	LD	H,(HL)
+	LD	L,A
+	LD	A,(HL)			; 'hl' has address of DBP
+	CP	40+1			; sectors per track information
+	JP	NC,MOVDPB		; have hard disk DPB
+	LD	DE,HINIT$1ST$MSG	; must run HINIT and SWAP first
+	CALL	JUSTIFY$RAGGED
+	POP	DE			; restore stack for exit
+	JP	ALL$DONE
+;
+; find address of first hard disk dpb
+;
+MOVDPB:
+	LD	HL,(WBOOT+1)		; get address of bios
+	LD	L,80H			; offset to dpbase
+	LD	DE,16*5			; offset to first hard disk dpb header
+	ADD	HL,DE			; 'hl'= first hard disk 
+	LD	DE,10			; offset to DPB address
+	ADD	HL,DE
+	LD	A,(HL)			; get the address of the dpb in 'hl'
+	INC	HL
+	LD	H,(HL)
+	LD	L,A
+	POP	DE			; restore destination address
+	LD	(DODPB+1),HL		; address of users hd dpb for boot loader
+	LD	BC,11*16		; move 176 bytes, 11 dpb's
+	LDIR
+;
+; find the HD$ALV$AVAIL block to save and the scsi controller burst/byte 
+; mode value and save. needed for Shugart and other non-burst controllers
+;
+	CALL	LB$HD$INFO
+	PUSH	HL			; save address of HD$ALV$AVAIL
+	LD	(HDAVL+1),HL		; save bios address in boot loader
+	LD	BC,12			; bytes to move into table
+	LDIR
+	POP	HL			; get location of HD$ALV$AVAIL back
+	PUSH	DE			; save table address
+	LD	DE,4
+	ADD	HL,DE			; 'hl' points to address of byte, burst
+	LD	A,(HL)
+	INC	HL
+	LD	H,(HL)
+	LD	L,A			; address of byte,burst mode byte
+	LD	A,(HL)			; get current value, 0 or 1
+	POP	DE
+	LD	(DE),A			; save value
+	LD	(CTLBYT+1),HL		; save bios address in boot loader
+;
+; we have all the information from the users bios in the patch area
+; read to overlay the first sector and write back to disk.
+;
+	LD	HL,BTSEC		; clean the boot sector
+	LD	BC,128
+CLEAN:
+	XOR	A
+	LD	(HL),A
+	INC	HL
+	DEC	BC
+	LD	A,B
+	OR	C
+	JP	NZ,CLEAN
+;
+; overlay the new boot loader on the boot sector
+;
+	LD	HL,PATCH$START		; begining of new boot loader
+	LD	DE,BTSEC		; location of boot sector in ram
+	LD	BC,SIZE$PATCH		; number of patch bytes
+	LDIR
+;
+	LD	HL,PATCHED$MSG		; add the patched message
+	LD	BC,PATCHED$LNG		; to the boot sector
+	LDIR
+;
+; now write it back to hard disk
+;
+	LD	A,SWRITE		; SCSI write
+	LD	(SCSICMD),A
+	LD	A,1			; target address
+	LD	HL,SCSICMD		; the SCSI command
+	LD	DE,BTSEC		; data area
+	CALL	LB$SCSIDRV		; do the write
+	JP	NZ,SCSIERR		; jump if error
+;
+; boot sector written, now do users swap and disk information
+;
+	LD	A,SWRITE		; SCSI write
+	LD	(SCSICMD),A
+	LD	A,31			; reserved sector 31
+	LD	(LOWADDR),A		;
+	LD	HL,SCSICMD
+	LD	DE,USER$TAB		;users BIOS information
+	LD	A,1
+	CALL	LB$SCSIDRV		; do the write
+	JP	NZ,SCSIERR
+	LD	DE,DONE$MSG		; all done, can boot from
+	CALL	JUSTIFY$RAGGED		; SCSI disk
+	JP	ALL$DONE
+;
+; show any scsi error that may have occured
+;
+SCSIERR:
+	LD	A,(DE)			; 'de' has address of sense info
+	CALL	A$TO$HL$HEX		; convert to ASCII
+	LD	(SENSE$BYTE),HL		; plug into message
+	LD	DE,SCSI$ERR$MSG		; display the SCSI error
+	CALL	JUSTIFY$RAGGED
+ALL$DONE:
+	JP	0			; return to CP/M
+;
+DEFINE$CDRIVE:
+	LD	DE,HD$CTRL$MSG		; Get HD controller name
+	LD	HL,HD$CTRL$OKC		; .
+	CALL	PROMPT			; .
+	JP	Z,DEFINE$CDRIVE		; . ESC -- top of this section
+	LD	A,B			; .
+	DEC	A			; .
+	LD	(HD$CTRL),A		; .
+	
+	XOR	A			; Clear step rate value, in case
+	LD	(STEP$RATE),A		; .  we've got a non-Xebec HDC
+	
+	LD	A,(HD$CTRL)		; Check for Xebec HDC
+	CP	NON$GENERIC		; If generic, then no need to
+	JR	C,DCDONE		; .  get drive info ...
+	
+	LD	DE,DRV$CYLS$MSG
+	CALL	PROMPT$DECIMAL
+	JP	Z,DEFINE$CDRIVE
+	LD	HL,DRV$CYLS
+	LD	(HL),D
+	INC	HL
+	LD	(HL),E
+	
+	LD	DE,DRV$HEAD$MSG		; Get # of heads
+	CALL	PROMPT$DECIMAL		; .
+	JP	Z,DEFINE$CDRIVE		; . ESC -- top of this section
+	LD	(DRV$HEAD),A		; .
+	
+	LD	DE,DRV$RWC$MSG		; Get reduced write current cylinder
+	CALL	PROMPT$DECIMAL		; .
+	JP	Z,DEFINE$CDRIVE		; . ESC -- top of this section
+	LD	HL,DRV$RWC		; .
+	LD	(HL),D			; .
+	INC	HL			; .
+	LD	(HL),E			; .
+
+	LD	DE,DRV$WPC$MSG		; Get write precomp cylinder
+	CALL	PROMPT$DECIMAL		; .
+	JP	Z,DEFINE$CDRIVE		; . ESC -- top of this section
+	LD	HL,DRV$WPC		; .
+	LD	(HL),D			; .
+	INC	HL			; .
+	LD	(HL),E			; .
+
+	LD	A,(HD$CTRL)		; Check for Xebec HDC
+	CP	NON$GENERIC		; .
+	JP	NZ,DTC
+	LD	DE,XEB$STEP$MSG		; Get step rate mode value
+	LD	HL,XEB$STEP$OKC		; .
+	CALL	PROMPT			; .
+	JP	Z,DEFINE$CDRIVE		; . ESC -- top of this section
+	LD	A,B			; .
+	DEC	A			; .
+	LD	(STEP$RATE),A		; .
+	JP	DCDONE			; .
+
+DTC:
+	LD	DE,DTC$STEP$MSG
+	LD	HL,DTC$STEP$OKC
+	CALL	PROMPT
+	JP	Z,DEFINE$CDRIVE
+	LD	A,B
+	DEC	A
+	LD	(STEP$RATE),A
+DCDONE:
+	LD	A,(HD$CTRL)		; Init HDC for this drive
+	LD	HL,HDC$INIT$EXT		; .
+	JP	GO$TABLE		; .
+;
+HDC$INIT$EXT:
+	DW	NO$INIT$NEEDED		; Generic SCSI HDC (burst mode)
+	DW	NO$INIT$NEEDED		; Generic SCSI HDC (byte mode)
+	DW	INIT$XEBEC		; Xebec 1410(A)
+	DW	INIT$DTC		; Data Technology 500 Series
+;
+; Initialize generic SCSI controller (ie do nothing)
+;
+NO$INIT$NEEDED:
+	LD	A,LD$HL$nnnn
+	LD	(PatchSCSI),A		; change CALL INITHDC
+	RET				; to LD HL,INITHDC
+;
+; initialize Xebec controller
+;
+INIT$XEBEC:
+	LD	DE,X$ID			; Where to put the format data
+	LD	HL,DRV$CYLS
+	LD	BC,DRV$DATA$LEN		; copy our data into it
+	LDIR
+	LD	DE,INIDAT
+	LD	HL,X$ID
+	LD	BC,X$ID$LEN
+	LDIR
+	LD	DE,INICMD		; Xebec init drive chars command
+	LD	HL,X$IC
+	LD	BC,X$IC$LEN
+	LDIR
+	RET
+
+X$IC:		DB	0CH
+		DB	0,0,0,0,0
+X$IC$LEN	EQU	$-X$IC
+X$ID:		DB	0,0,0,0,0,0,0,0BH
+X$ID$LEN	EQU	$-X$ID
+;
+; Initialize DTC 500 series controller
+;
+INIT$DTC:
+	LD	HL,(DRV$CYLS)		; store drive info into DTC command
+	LD	(D$CYL),HL
+	LD	A,(DRV$RWC+1)		; cylinders
+	LD	(D$RWC),A		; RWC - only 1 byte damit
+	LD	A,(DRV$HEAD)
+	DEC	A
+	LD	(D$HD),A		; # of heads
+	LD	A,(STEP$RATE)		; setup step rate
+	LD	E,A
+	LD	D,0
+	LD	HL,D$TRAN$TBL
+	ADD	HL,DE
+	LD	A,(HL)
+	LD	(D$STPR),A
+	XOR	A
+	LD	(STEP$RATE),A
+	LD	DE,INICMD
+	LD	HL,D$MSC
+	LD	BC,6
+	LDIR
+	LD	DE,INIDAT
+	LD	HL,D$MSD
+	LD	BC,10
+	LDIR
+	RET
+;
+; * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+;							*
+;	      	Misc data and messages . . .		*
+;							*
+; * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+;
+D$TRAN$TBL:	DB	60
+		DB	4
+		DB	3
+		DB	2
+		DB	1
+
+D$MSC:		DB	0C2H,0,0
+		DB	0,0,0
+D$MSD:		DB	11
+D$STPR:		DB	0
+		DB	0
+D$HD:		DB	0
+D$CYL:		DB	0,0
+D$RWC:		DB	0,0,0,0
+;
+BAD$ID$MSG:	DB	CR,LF
+		DB	'Little Board ID = '
+SHID:		DB	'  , must = 7 to run this utility.$'
+ASK$CONT$MSG:	DB	CR,LF
+		DB	'Do you wish to continue? (Y/N) $'
+ASK$CONT$OKC:	DB	'YN',0
+;
+INV$BOOT$SCT$MSG:
+		DB	CR,LF
+		DB	'Valid Boot sector not present on hard disk, do'
+		DB	' SYSGEN, HINIT, and SWAP, then retry.$'
+HINIT$1ST$MSG:	DB	CR,LF
+		DB	'Run HINIT and SWAP to set up your system first.'
+		DB	CR,LF,EOS
+PATCHED$MSG:	DB	'<<<Patched by HGEN Version 1.3>>>'
+PATCHED$LNG EQU	$-PATCHED$MSG
+DONE$MSG:	DB	CR,LF
+		DB	'Done!  You may now boot from hard disk.',CR,LF,LF,EOS
+SCSI$ERR$MSG:	DB	CR,LF
+		DB	'SCSI read/write error, Sense byte = '
+SENSE$BYTE:	DB	'  ',CR,LF,LF,EOS
+HD$CTRL$MSG:	DB	CR,LF
+		DB	'Hard disk controller type:',CR,LF
+		DB	'--------------------------',CR,LF,LF
+		DB	'Of the following controllers ...',CR,LF,LF
+		DB	TAB,'1 - Generic burst-mode SCSI controller (Adaptec'
+		DB	' ACB4000, Xebec Owl)',CR,LF
+		DB	TAB,'2 - Generic byte-mode SCSI controller (Shugart'
+		DB	' 1610-4)',CR,LF
+		DB	TAB,'3 - Xebec 1410 or 1410A',CR,LF
+		DB	TAB,'4 - Data Technology 500 Series',CR,LF,LF
+		DB	'Which type is at SCSI address 0 (1, 2, 3, or 4)? $'
+;
+HD$CTRL$OKC:	DB	'12'
+NON$GENERIC EQU	$-HD$CTRL$OKC
+		DB	'34',0
+;
+DRV$CYLS$MSG:	DB	CR,LF
+		DB	'For the controller you indicated, the following'
+		DB	' additional information on the drive at LUN 0 is'
+		DB	' required:',CR,LF,LF
+		DB	'      Number of cylinders? $'
+DRV$HEAD$MSG:	DB	'          Number of heads? $'
+DRV$RWC$MSG:	DB	'Starting cylinder for RWC? $'
+DRV$WPC$MSG:	DB	'Starting cylinder for WPC? $'
+XEB$STEP$MSG:	DB	CR,LF
+		DB	'Xebec 1410(A) step mode (choose from the following'
+		DB	' table):',CR,LF
+		DB	TAB,'0 -   3ms step',CR,LF
+		DB	TAB,'4 - 200us buffered step',CR,LF
+		DB	TAB,'5 -  70us buffered step',CR,LF
+		DB	TAB,'6 -  30us buffered step',CR,LF
+		DB	TAB,'7 -  15us buffered step',CR,LF
+		DB	'Which step mode (0, 4, 5, 6, or 7)? $'
+;
+XEB$STEP$OKC:	DB	'0',0FFH,0FFH,0FFH
+		DB	'4567',0
+;
+DTC$STEP$MSG:	DB	CR,LF
+		DB	'Data Technology 500 Series step mode (choose from the'
+		DB	' following table):',CR,LF
+		DB	TAB,'0 -   3ms step',CR,LF
+		DB	TAB,'1 - 200us buffered step',CR,LF
+		DB	TAB,'2 - 150us buffered step',CR,LF
+		DB	TAB,'3 - 100us buffered step',CR,LF
+		DB	TAB,'4 -  50us buffered step',CR,LF
+		DB	'Which step mode (0, 1, 2, 3, or 4)? $'
+DTC$STEP$OKC:	DB	'01234',0
+HD$CTRL:	DB	0
+DRV$CYLS:	DW	0
+DRV$HEAD:	DB	0
+DRV$RWC:	DW	0
+DRV$WPC:	DW	0
+DRV$DATA$LEN	EQU	$-DRV$CYLS
+STEP$RATE:	DB	0
+; * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+;							*
+;		Library routines . . .			*
+;							*
+; * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+
+
+A$TO$HL$HEX:
+;
+; [DC.27]
+;
+; Converts the number in A to the hex digits in HL
+;
+; Entry:
+; 	A  = number to convert
+;
+; Exit:
+;	HL = the hex equivalent of the number (L=high, H=low)
+;		(use shld to store the converted number)
+;
+; Modifies: none
+;
+	PUSH	AF			; Save original number
+	RRCA				; Get high nybble
+	RRCA				; .
+	RRCA				; .
+	RRCA				; .
+	AND	0FH			; .
+	CALL	A$TO$HEX		; Convert to hex
+	LD	L,A			; Save in L register
+	POP	AF			; Get original number back
+	PUSH	AF			; Save again for later
+	AND	0FH			; Get low nybble
+	CALL	A$TO$HEX		; Convert to hex
+	LD	H,A			; Save in H register
+	POP	AF			; Get original number back
+	RET				; and return
+
+A$TO$HEX:
+					; Convert A to a hex digit
+	CP	0AH			; If 0-9, we don't need to 
+	JP	M,A$TO$HEX$2		; .  add any offset
+	ADD	A,07H			; Offset for A-F
+A$TO$HEX$2:
+					; .
+	ADD	A,'0'			; ASCII bias
+	RET				; and return
+
+
+BIN$TO$SCSI:
+;
+; [E6.10]
+;
+; Converts binary 0-7 to SCSI address 
+;
+; Entry:
+;	A  = number to convert (0-7)
+;
+; Exit:
+;	A  = converted SCSI address    [00H = error]
+;
+; Modifies: B
+;
+	AND	07H			; Mask out all but addrs 0-7
+	INC	A			; Bump A to shift at least one bit
+	LD	B,A			; .  and move to the B register
+	XOR	A			; Clear A register
+	SCF				; Set carry for shift
+BIN$NEXT$BIT:
+	RLA				; Shift left one bit
+	DEC	B			; Decrement count
+	JR	NZ,BIN$NEXT$BIT
+	RET				; Z = all done
+
+
+CENTER$OUTPUT:
+;
+; [DC.20]
+;
+; Automatically centers the output line(s) based on the line width
+; stored in SCREEN$WIDTH.  Each line is delimited with CR+LF.  This
+; routine will return to the caller when it encounters the string
+; terminator, '$'.  Any additional LF characters after a CR+LF pair
+; will be passed through.
+;
+; Entry:
+;	DE = Pointer to output string(s), terminated with CR+LF.
+;
+; Exit:
+;	The output string(s) are sent to the screen
+;
+; Modifies: DE
+;
+	PUSH	AF			; Save registers
+	PUSH	BC			; .
+	PUSH	HL			; .
+CENTER$NEXT$LN:
+	CALL	GET$STRLEN		; Get length to next CR or '$' in B
+	LD	A,B			; Check for zero length
+	OR	A			; .
+	JP	Z,NEXT$DELIM		; If so, output the CR, LF, etc.
+	LD	A,(SCREEN$WIDTH)	; Compute offset needed to center line
+	SCF				; .
+	SBC	A,B			; .  (if there are too many chrs, just
+	JP	C,NO$BLANKS		; .   print the line as is . . . )
+	AND	0FEH			; Clear least significant bit
+	RRCA				; .  and rotate to divide by two
+	LD	C,' '			; Output enough blanks to center line
+	CALL	NZ,CON$CHR$AC		; .  (only if count is non-zero)
+NO$BLANKS:
+	LD	A,(HL)			; Save CR for later
+	LD	(HL),EOS		; Plug position with '$' for cp/m
+	CALL	CON$MSG			; .  print string function
+	LD	(HL),A			; Restore saved CR
+NEXT$DELIM:
+	LD	A,(HL)			; Get character
+	CP	CR			; Print it if CR
+	JP	Z,OUTPUT$DELIM		; .
+	CP	LF			; Print it if LF
+	JP	Z,OUTPUT$DELIM		; .
+	CP	EOS			; Stop processing if EOS ('$')
+	JP	Z,CENTER$DONE		; .
+	EX	DE,HL			; Put new pointer in DE
+	JP	CENTER$NEXT$LN		; Go & do the next line
+OUTPUT$DELIM:
+	CALL	CON$CHR			; Output delimiter
+	CP	LF			; Wait 10ms if we have a line feed
+	CALL	Z,WAIT			; .
+	INC	HL			; Point to next chr
+	JP	NEXT$DELIM		; and check that one, also
+CENTER$DONE:
+	POP	HL			; Restore registers
+	POP	BC			; .
+	POP	AF			; .
+	RET				; and return
+
+
+CLEAR$SCREEN:
+;
+; [E1.28]
+;
+; This routine clears the screen by calling DO$CRLF 26 times.
+;
+; Entry:
+;	None
+;
+; Exit:
+;	The screen is cleared
+;
+; Modifies:
+;	None
+;
+	PUSH	AF			; Save just in case
+	LD	A,26			; 26 CRLF's
+C$NEXT$LINE:
+	CALL	DO$CRLF			; Next line
+	DEC	A			; Done?
+	JP	NZ,C$NEXT$LINE		; Nope.
+	POP	AF			; Restore original AF
+	RET				; and return
+
+
+CMP$HL$DE:
+;
+; [E6.10]
+;
+; Compare register pair HL with register pair DE.
+;
+; Entry:
+;	DE,HL = data to compare
+;
+; Exit:
+;	Z: DE = HL, NZ: DE # HL
+;	C: HL < DE, NC: HL >= DE
+;
+; Modifies:
+;	PSW
+;
+	LD	A,H			; Compare high bytes
+	CP	D			; .
+	RET	NZ			; If not zero, flags are set
+	LD	A,L			; Compare low bytes
+	CP	E			; .
+	RET				; Return with flags set
+
+
+CON$CHR:
+;
+; [DC.20]
+;
+; This routine sends the character in the "A" register to the console
+; through the BDOS conout call.
+;
+; Entry:
+;	A  = character to send
+;
+; Exit:
+;	character is sent to the console
+;
+; Modifies:
+;	None
+;
+	PUSH	AF
+	PUSH	BC
+	PUSH	DE
+	PUSH	HL
+	LD	C,2
+	LD	E,A
+	CALL	BDOS
+	POP	HL
+	POP	DE
+	POP	BC
+	POP	AF
+	RET
+
+
+CON$CHR$AC:
+;
+; [DC.20]
+;
+; This routine sends the character in the C register to the console
+; the number of times in the A register.
+;
+; Entry:
+;	A  = Number of times to send character
+;	C  = Character to send
+;
+; Exit:
+;	Same
+;
+; Modifies:
+;	None
+;
+	PUSH	AF			; Save all registers
+	PUSH	BC			; .
+	PUSH	DE			; .
+	PUSH	HL			; .
+	LD	B,A			; Move data to accomodate CP/M
+	LD	A,C			; .
+NEXT$CHR$OUT:
+	CALL	CON$CHR			; Send 1 chr
+	DEC	B			; Decrement counter
+	JP	NZ,NEXT$CHR$OUT		; Done?
+	POP	HL			; Restore all registers
+	POP	DE			; .
+	POP	BC			; .
+	POP	AF			; .
+	RET				; and return
+
+
+CONIN$NE$XC:
+;
+; [E1.28]
+;
+; Console input, no echo, exit on ctrl-c
+;
+; Entry:
+;	none
+;
+; Exit:
+;	A  = character from console, except for ctrl-c, which causes
+;	     an immediate jump to ALL$DONE
+;
+; Modifies:
+;	A
+;
+	CALL	LB$CONIN
+	CP	CTRLC
+	JP	Z,ALL$DONE
+	RET
+
+
+CON$MSG:
+;
+; [DC.20]
+;
+; Console message 
+;
+; Entry:
+;	DE = pointer to message string, terminated with '$'
+;
+; Exit:
+;	message printed on console
+;
+; Modifies: A, BC
+;
+	PUSH	AF			; Save registers
+	PUSH	BC			; .
+	PUSH	DE			; .
+	PUSH	HL			; .
+	LD	C,9			; BDOS print string command
+	CALL	BDOS			; .
+	POP	HL			; Restore registers
+	POP	DE			; .
+	POP	BC			; .
+	POP	AF			; .
+	RET				; and return
+
+
+DE$TO$HL$DEC:
+;
+; [E6.25]
+;
+; Convert the 16-bit number in the DE register pair to a 5-digit
+; decimal number.  Store this number starting in the memory pointed
+; to by the HL register pair.  Optionally convert leading zeroes to
+; blanks.
+;
+; Call DE$TO$HL$DEC   to convert leading zeroes to blanks
+; Call DE$TO$HL$DEC$0 to leave leading zeroes alone
+;
+; Entry:
+;	DE = number to convert
+;	HL = ptr to target memory location
+;
+; Exit:
+;	DE,HL unchanged
+;
+; Modifies:
+;	PSW
+;
+	LD	A,1			; Set "clear leading 0's" mode
+	JR	E$DETOHL		; Jump to entry point
+DE$TO$HL$DEC$0:
+	XOR	A			; Set "leave leading 0's alone" mode
+E$DETOHL:
+	LD	(DE$TO$HL$MODE),A	; Save mode flag
+	PUSH	BC			; Save registers
+	PUSH	DE			; .
+	PUSH	HL			; .
+	LD	BC,-10000		; Convert ten-thousands digit
+	CALL	TODEC			; .
+	LD	BC,-1000		; Convert thousands digit
+	CALL	TODEC			; .
+	LD	BC,-100			; Convert hundreds digit
+	CALL	TODEC			; .
+	LD	BC,-10			; Convert tens digit
+	CALL	TODEC			; .
+	LD	A,E			; Convert ones digit
+	ADD	A,'0'			; .  (Leave zero intact)
+	LD	(HL),A			; .
+	XOR	A			; Clear PSW
+	POP	HL			; Restore registers
+	POP	DE			; .
+	POP	BC			; .
+	RET				; and return ...
+
+TODEC:
+	LD	A,'0'			; Start with an ASCII zero
+	PUSH	HL			; Save target string pointer
+	EX	DE,HL			; Move number to convert to HL
+TODEC1:
+	LD	E,L			; Save a copy of current HL in DE
+	LD	D,H			; .  (in case we're done)
+	INC	A			; Bump digit
+	ADD	HL,BC			; Add "negative" BC to HL
+	JR	C,TODEC1		; Continue while Carry set
+	DEC	A			; Get rid of extra bump
+	POP	HL			; Restore target string pointer
+	LD	(HL),A			; Save digit
+	CP	'0'			; Is the digit an ascii zero?
+	JR	NZ,NOZERO		; No,  Turn off leading 0's flag
+	LD	A,(DE$TO$HL$MODE)	; Yes, Check leading 0's flag
+	OR	A			; Convert leading 0's to blanks?
+	JR	Z,NOBLANK		; No,  Leave digit alone
+	LD	(HL),' '		; Yes, Change digit to a blank
+	JR	NOBLANK			; All done for now
+NOZERO:
+	XOR	A			; Turn off leading 0's flag
+	LD	(DE$TO$HL$MODE),A	; .
+NOBLANK:
+	INC	HL			; Bump digit pointer
+	RET				; and return ...
+
+DE$TO$HL$MODE:	DB	0		; "Convert 0's to blanks" flag
+
+
+DO$CRLF:
+;
+; [DC.27]
+;
+; This routine sends a carriage return and a line feed to the terminal,
+; and then waits 'SLOW$TERM' ms for a slow terminal to catch up.
+;
+; Entry:
+;	none
+;
+; Exit:
+;	CR + LF is sent to the screen.
+;
+; Modifies:
+;	none
+;
+	PUSH	AF			; Save AF
+	LD	A,CR			; Send carriage return
+	CALL	CON$CHR			; .
+	LD	A,LF			; and line feed
+	CALL	CON$CHR			; .
+	LD	A,(SLOW$TERM)		; Check slow flag
+	OR	A			; .
+	CALL	NZ,WAIT			; wait for the s-l-o-w terminals
+	POP	AF			; recover original AF
+	RET				; and return
+
+
+GET$BIOS$VERS:
+;
+; [E5.24]
+;
+; Get bios version -- Copies the current BIOS jump tables (starting
+; at warm boot) to a local area for ease of utility access.  If the
+; BIOS is version 2.0 or greater, the secondary jump table is copied
+; also.
+;
+; Entry:
+;	none
+;
+; Exit:
+;	Z  = bios 1.0 - 1.4 (floppy only bios)
+;	NZ = bios 2.0 or greater (floppy & fixed disk bios)
+;
+; Modifies: All registers
+;
+	LD	HL,(WBOOT+1)		; Get start of bios jump table
+	LD	DE,LB$BIOS$TBL		; Move bios to local storage
+	LD	BC,LB$LEN		; .  (length of bios area)
+	LDIR
+	LD	A,10			; Test CP/M version
+	CALL	LB$GETNXT		; Get next jump table
+	LD	(BIOS$VERSION),A	; Save bios version
+	INC	HL			; See if HL is 0FFFFh
+	LD	A,H			; .
+	OR	L			; .
+	RET	Z			; If so, then old version
+	DEC	HL			; Fix HL as it has the table addr
+	LD	DE,LB$XTBL		; Move extra table to local storage
+	LD	BC,LB$XLEN		; .  (length of extra table)
+	LDIR
+	LD	A,0FFH			; Set NZ to indicate bios
+	OR	A			; ... version 2.1+
+	RET				; ... and return.
+
+BIOS$VERSION:
+	DB	0			; Current bios version
+
+
+GET$HL$PTR:
+;
+; [DC.20]
+;
+; Gets the pointer pointed to by HL and puts it in HL
+;
+; Entry:
+;	HL = pointer to put in HL
+;
+; Exit:
+;	HL = pointer
+;
+; Modifies: none
+;
+	PUSH	AF			; Save A register
+	LD	A,(HL)			; Get low byte of pointer
+	INC	HL			; .
+	LD	H,(HL)			; Get high byte of pointer
+	LD	L,A			; Pointer is now together
+	POP	AF			; Restore A register
+	RET				; and return
+
+
+GET$STRLEN:
+	
+; Searches the string pointed to by HL and returns the string length
+; to the next carriage return.  The length is returned in B.
+	PUSH	DE			; Save start of string
+	LD	B,0			; Clear counter
+TRY$NEXT$CHR:
+	LD	A,(DE)			; Get character
+	CP	CR			; Is it CR?
+	JP	Z,EOS$FOUND		; .
+	CP	EOS			; Is it '$'?
+	JP	Z,EOS$FOUND		; .
+	INC	B			; No -- increment count and
+	INC	DE			; .  point to the next character
+	JP	TRY$NEXT$CHR		; .
+EOS$FOUND:
+	POP	HL			; CR or '$' found, recall orig ptr
+	EX	DE,HL			; DE=orginial, HL=current
+	RET				; and return
+
+
+GO$TABLE:
+;
+; [E2.05]
+;
+; Jump to a routine based on a table of pointers
+;
+; Entry:
+;	A  = index into table
+;	HL = table base address
+;
+; Exit:
+;	Routine at (A*2)+HL is executed
+;
+; Modifies:
+;	B, HL
+;
+	LD	BC,2			; Compute offset to table of routines
+	CALL	INDEX$TABLE		; .
+	CALL	GET$HL$PTR		; .
+	JP	(HL)			; Jump to proper routine
+
+
+HL$DIV$2:
+	PUSH	AF
+	XOR	A
+	LD	A,H
+	RRA
+	LD	H,A
+	LD	A,L
+	RRA
+	LD	L,A
+	POP	AF
+	RET
+
+
+INDEX$TABLE:
+;
+; [E1.30]
+;
+; Computes offset to table given base address, entry length, and entry
+; requested.
+;
+; Entry:
+;	A  = entry #
+;	BC = table entry length
+;	HL = base address
+;
+; Exit:
+;	HL = address to entry
+;
+; Modifies:
+;	A, BC, HL
+;
+	OR	A			; Set up flags for first check
+I$TBL$ADD:
+	RET	Z			; If A=0, we're done
+	ADD	HL,BC			; Otherwise add length to base,
+	DEC	A			; .  decrement counter,
+	JP	I$TBL$ADD		; .  and check again.
+
+
+IS$IT$OK:
+;
+; [E1.28]
+;
+; Check the character in A against the list of "OK" chrs pointed
+; to by HL
+;
+; Entry:
+;	A  = character to check
+;	HL = pointer to list of "OK" characters
+;
+; Exit:
+;	A  = original character if ok, 0ffh if not in list
+;	B  = position of character in list
+;
+; Modifies:
+;	BC
+;
+	PUSH	HL			; Save original "OK" pointer
+	LD	C,A			; Save chr to check against
+	LD	B,0			; Clear counter
+	CP	ESC			; If chr is <ESC>
+	JP	Z,I$CHR$OK		; .  then automatically ok
+	INC	B			; .  otherwise start counting at 1
+I$CHK$NEXT:
+	LD	A,(HL)			; Get chr to check against
+	OR	A			; End of table?
+	JP	NZ,I$NOT$EOT		; No, check chr
+	DEC	A			; Decrement to get 0ffh
+	LD	B,A			; Stuff for later move
+	JP	I$CHR$OK		; And exit
+I$NOT$EOT:
+	CP	C			; Chrs match?
+	JP	Z,I$CHR$OK		; . Yes, return
+	INC	HL			; . No, bump pointer
+	INC	B			; . . and bump counter
+	JP	I$CHK$NEXT		; . . and check next chr
+I$CHR$OK:
+	LD	A,B			; Set status based on
+	OR	A			; .  position counter
+	LD	A,C			; Get user chr back
+I$DONE:
+	POP	HL			; and original "OK" pointer
+	RET				; and return
+
+
+JUSTIFY:
+;
+; [E6.11]
+;
+; This routine will send a data stream to the console, with each line
+; justified based on the SCREEN$WIDTH value.  The stream must terminate
+; with the CP/M end of string character ($) and may contain imbedded
+; CR,LF pairs to separate paragraphs.
+;
+; NOTE:  To insure proper operation, the LF character should only follow
+; a CR character or another LF character, as the CR character is used to
+; flush the current line without justification.
+;
+; Two entry points are provided:
+;	JUSTIFY		Justify output, flush right
+;	JUSTIFY$RAGGED	Justify output, ragged right
+;
+; As of E6.11, the flush right routine was not installed, so either
+; entry point will provide the same results.
+;
+; Entry:
+;	DE = pointer to line(s) to output
+;
+; Exit:
+;	The data is sent to the screen.
+;
+; Modifies: All registers
+;
+	LD	A,80H			; Set flush right mode
+	JR	E$JUSTIFY		; Jump to routine entry
+JUSTIFY$RAGGED:
+	LD	A,00H			; Set ragged right mode
+E$JUSTIFY:
+	LD	(J$MODE),A		; Save mode byte
+	LD	A,EOS			; Mark start of buffer
+	LD	(OUTBUF-1),A		; .
+	EX	DE,HL			; DE is usually print source
+J$NEXT$LINE:
+	XOR	A			; Clear character counter
+	LD	(BLANK$LEN),A		; .
+	LD	B,A			; .
+	LD	DE,OUTBUF		; Set up buffer pointer
+J$CHECK$CHR:
+	LD	A,(HL)			; Get character
+	CP	CR			; CR?
+	JR	NZ,J$NO$R		; .
+	CALL	J$FLUSH$LINE		; .  Flush output line,
+	LD	A,CR			; .  Output CR,
+	CALL	CON$CHR			; .  .
+	INC	HL			; .  bump ptr & check next
+	JR	J$NEXT$LINE
+J$NO$R:
+	CP	LF			; LF?
+	JR	NZ,J$NO$L		; .
+	CALL	CON$CHR			; .  Output LF,
+	INC	HL			; .  bump ptr & check next
+	JR	J$CHECK$CHR
+J$NO$L:
+	CP	FF			; FF?
+	JR	NZ,J$NO$F		; .
+	CALL	CLEAR$SCREEN		; .  Clear screen,
+	INC	HL			; .  bump ptr & check next
+	JR	J$CHECK$CHR
+J$NO$F:
+	CP	EOS			; End of string?
+	JR	NZ,J$NO$S		; .
+	CALL	J$FLUSH$LINE		; .  Flush output line, and
+	RET				; .  return to caller.
+J$NO$S:
+	LD	(DE),A			; Not a special chr, save in buffer
+
+	CP	' '			; Blank?
+	JR	NZ,J$NO$B		; .  No, don't save position
+	LD	(BLANK$POS),HL		; Save position for later
+	EX	DE,HL			; and save corresponding position
+	LD	(OUTBUF$BLANK),HL	; .  of the blank we just saved
+	EX	DE,HL			; .  in the output buffer
+	LD	A,B			; .
+	LD	(BLANK$LEN),A		; Save current length also
+J$NO$B:
+	INC	B			; Increment counter
+	INC	HL			; .  and input pointer
+	INC	DE			; .  and output pointer
+	LD	A,(SCREEN$WIDTH)	; Compare counter against screen width
+	SUB	B			; .
+	JP	P,J$CHECK$CHR		; And continue checking if not past end
+;
+; Screen width exceeded, send this line to the screen.
+;
+	LD	HL,(OUTBUF$BLANK)	; Get pos of last blank in output buf
+	LD	(HL),EOS		; and plug with eos ('$')
+	LD	A,(J$MODE)		; Justify right edge only if the
+	OR	A			; .  right-justify flag is non-zero
+	CALL	M,J$ADD$BLANKS		; .
+	CALL	J$SEND$BUFFER		; Output the line to the screen
+	CALL	DO$CRLF			; and a CR / LF
+	LD	HL,(BLANK$POS)		; Get pointer to where we left off
+J$SKIP$BLANKS:
+	INC	HL			; Bump pointer past blank(s)
+	LD	A,(HL)			; .
+	CP	' '			; .
+	JR	Z,J$SKIP$BLANKS
+	JP	J$NEXT$LINE		; and check next segment
+
+J$FLUSH$LINE:
+					; Flush line when CR or EOS encountered
+	LD	A,EOS			; Plug current position with EOS ($)
+	LD	(DE),A			; .
+	CALL	J$SEND$BUFFER		; Send this line of data
+	RET				; and return
+
+J$ADD$BLANKS:
+	RET				; At a later time, this routine will
+					; justify the right margin by inserting
+					; extra blanks in the output line.
+
+J$SEND$BUFFER:
+	LD	A,B			; If line to output is of zero length,
+	OR	A			; .  then don't output the line.
+	RET	Z			; .
+	LD	DE,OUTBUF		; Get address of output buffer
+	CALL	CON$MSG			; and call our print message routine
+	RET				; return
+
+J$MODE:		DB	0		; Current right justify mode
+BLANK$POS:	DW	0		; Last blank on this line
+OUTBUF$BLANK:	DW	0		; Last blank in the output buffer
+BLANK$LEN:	DB	0		; Length of line to the blank
+
+; NOTE: OUTBUF is defined to be after the stack and before the heap.
+
+; end of justify$output data area
+
+
+PROMPT:
+;
+; [E6.14]
+;
+; Prompt the user or the command line for input.
+;
+; Two entry points are provided:
+;	PROMPT		standard entry, CRLF after chr from user
+;	PROMPT$NOLF	special entry, No CRLF after chr from user
+;
+; When the command line is used for input, the following characters
+; are translated to new values or new functions:
+;
+;	Character	New character or new function
+;	--------------	------------------------------------
+;	  (space)	Ignored
+;	, (comma)	<RETURN> key
+;	. (period)	<ESC> key
+;	@ (at-sign)	repeat existing command line
+;	_ (underscore)	Prompt and get character from user
+;
+; Entry:
+;	DE = pointer to prompt string 
+;	HL = pointer to list of valid chars (terminated with 00H)
+;
+; Exit:
+;	A  = char from the user
+;	B  = position of this character (0, 1, 2, ... n)
+;
+;	Z  = char was the escape key
+;	NZ = char was not the escape key
+;
+; Modifies:
+;	PSW, BC
+;
+	LD	A,01H			; Set CRLF after chr
+	JR	E$PROMPT		; Jump to entry point
+PROMPT$NOLF:
+	LD	A,00H			; Set no CRLF after chr
+E$PROMPT:
+	LD	(PROMPT$MODE),A		; Save prompt mode flag
+	LD	(USER$OKLIST),HL 	; .  and user 'ok' chr list
+RE$PROMPT:
+	LD	A,(CMD$LINE$CHRS)	; Are there any characters left from
+
+	OR	A			; .  the command line?
+	JR	Z,P$DISP		; No,  dsp text & get chr from bios
+	DEC	A			; Yes, reduce # of chrs by one
+	LD	(CMD$LINE$CHRS),A	; .
+	LD	HL,(CMD$LINE$PTR)	; Get command line character
+	LD	A,(HL)			; .
+	INC	HL			; .
+	LD	(CMD$LINE$PTR),HL	; .
+
+	CP	' '			; Ignore spaces
+	JR	Z,RE$PROMPT
+
+	CP	'@'			; @ = repeat cmd line
+	JR	NZ,P$NO$R		; .
+	LD	HL,INBUF+2		; Set command line pointer back
+	LD	(CMD$LINE$PTR),HL	; .  to the beginning
+	LD	A,07FH			; Set count of chrs to 127
+	LD	(CMD$LINE$CHRS),A	; .  (the most it could be)
+	JR	RE$PROMPT
+P$NO$R:
+	CP	','			; Change ',' to CR
+	JR	NZ,P$NO$C		; .
+	LD	A,CR			; .
+P$NO$C:
+	CP	'.'			; Change '.' to ESC
+	JR	NZ,P$NO$D		; .
+	LD	A,ESC			; .
+P$NO$D:
+	CP	'_'			; Underscore = prompt anyway
+	JR	Z,P$DISP		; .
+
+	CALL	TO$UPPER		; Convert the chr to upper case
+	LD	HL,(USER$OKLIST)	; Get the user ok chr list
+	CALL	IS$IT$OK		; Check the chr against the ok list
+	RET	P			; If ok, return
+	XOR	A			; Otherwise, cancel the cmd line
+	LD	(CMD$LINE$CHRS),A	; .  buffer and fall through to p$disp
+P$DISP:
+	CALL	JUSTIFY			; and call justify routine
+P$TRY$AGAIN:
+	CALL	CONIN$NE$XC		; Console input, no echo, except ^C
+	CALL	TO$UPPER		; Convert the chr to upper case
+	LD	HL,(USER$OKLIST)	; Get the user ok chr list
+	CALL	IS$IT$OK		; Check the chr against the ok list
+	JP	M,P$TRY$AGAIN		; Not there, try again
+	CALL	NZ,CON$CHR		; Display chr we found
+	PUSH	AF			; Check mode flag in case we need
+	LD	A,(PROMPT$MODE)		; .  to send a CR+LF after the
+	BIT	0,A			; .  user's input
+	CALL	NZ,DO$CRLF		; .
+	POP	AF			; .
+	RET				; and return
+
+PROMPT$MODE:	DB	0		; Prompt mode flag
+USER$OKLIST:	DW	0		; User 'ok' chr list
+
+; end of PROMPT routine
+
+
+PROMPT$DECIMAL:
+;
+; [E6.11]
+;
+; Prompt the user for a decimal input of up to 5 digits.  The Z flag
+; indicates the termination character: Z = ESC key, results may not
+; be valid; NZ = RETURN key, results valid.
+;
+; Entry:
+;	DE = pointer to prompt string
+;
+; Exit:
+;	DE = Value entered by the user, 0-0FFFFH
+;	A  = Low byte of value entered by the user, 0-0FFH
+;
+;	Z  = ESC key pressed, ignore results
+;	NZ = RETURN key pressed, results valid
+;
+; Modifies:
+;	A, PSW
+;
+	LD	A,01H			; Set CRLF after entry
+	JR	E$PR$DEC		; Jump to entry point
+PROMPT$DEC$NOLF:
+	LD	A,00H			; Set no CRLF after entry
+E$PR$DEC:
+	LD	(PROMPT$D$MODE),A	; Save prompt mode flag
+	PUSH	HL			; Save original HL reigster
+	PUSH	BC			; .  and the BC register, too.
+	XOR	A			; Clear the current digit pointer
+	LD	C,A			; Setup count in C register
+	LD	HL,SCRATCH		; Initialize the scratch pointer
+NEXT$DIGIT:
+	PUSH	BC			; Save digit counter
+	PUSH	HL			; .  and string pointer
+	LD	HL,DEC$INPUT$OKC	; Get current 'ok' chrs
+	CALL	PROMPT$NOLF		; Prompt for digit
+	POP	HL			; Get string pointer back
+	POP	BC			; .  along with digit counter
+	JR	Z,ESCRTN		; Return if ESC key hit
+	CP	CR			; Check for return
+	JP	Z,CONVERT$STRING	; Convert string to decimal, if so
+	CP	BS			; Check for backspace
+	JP	Z,BACKUP$DIGIT		; Back up 1 digit, if we can
+
+	LD	B,A			; Save character for a moment
+	LD	A,C			; Check digit count
+	CP	5			; .
+	JP	C,ADD$DIGIT		; 5 digits or less, add to string
+	LD	DE,BLOT			; More than 5 digits, blot this one
+	CALL	CON$MSG			; .
+	JP	DE$FOR$NEXT		; .
+ADD$DIGIT:
+	INC	C			; Otherwise bump digit count
+	LD	(HL),B			; Save digit
+	INC	HL			; Bump digit pointer
+	JP	DE$FOR$NEXT		; Setup DE for next prompt
+
+BACKUP$DIGIT:
+	LD	A,' '			; Bump forward to clear digit
+	CALL	CON$CHR			; .
+	XOR	A			; Are we at the beginning?
+	CP	C			; .
+	JP	Z,DE$FOR$NEXT		; Yes, don't backup
+	LD	A,BS			; Backup to correct position
+	CALL	CON$CHR			; .
+	DEC	HL			; Backup pointer 1 chr
+	DEC	C			; Push count 1 back, also
+DE$FOR$NEXT:
+	LD	DE,DEC$INPUT$MSG	; Setup for next prompt
+	JP	NEXT$DIGIT		; .
+
+CONVERT$STRING:
+	LD	(HL),0			; Mark end of string
+	LD	HL,SCRATCH		; Get beginning of string
+	CALL	STR$TO$DE		; Convert string to DE register
+	LD	A,0FFH			; Insure NZ flag
+	OR	A			; .
+	LD	A,E			; Move low byte to A
+	PUSH	AF			; Check mode flag to see if a
+	LD	A,(PROMPT$D$MODE)	; .  CR+LF should be sent after
+	OR	A			; .  the user's input
+	CALL	NZ,DO$CRLF		; .
+	POP	AF			; .
+ESCRTN:
+	POP	BC			; Get old BC register back
+	POP	HL			; .  and original HL, as well.
+	RET				; and return with result in HL & A
+
+DEC$INPUT$MSG:	DB	EOS		; Decimal input message
+DEC$INPUT$OKC:	DB	'0123456789'	; Decimal input 'ok' chrs
+		DB	BS,CR,0		; .
+BLOT:		DB	BS,' ',BS,EOS	; Blot out digit
+SCRATCH:	DB	'     ',0	; Max 5 digits
+PROMPT$D$MODE:	DB	0		; CRLF flag
+
+
+RET$TO$CONT:
+;
+; [E2.19]
+;
+; Prompts and waits for the RETURN key to be pressed.
+;
+; Entry:
+;	none
+;
+; Exit:
+;	Display message and wait for a RETURN key.
+;
+; Modifies:
+;	all
+;
+	LD	DE,RTC$MSG		; Press RETURN to continue ...
+	CALL	CENTER$OUTPUT		; .
+	LD	DE,NO$MSG		; .
+	LD	HL,RTC$OKC		; .
+	CALL	PROMPT			; .	[ CR ]
+	RET
+
+RTC$MSG:	DB	'Press the RETURN key to continue ...'
+NO$MSG:		DB	EOS
+RTC$OKC:	DB	CR,0
+
+; end of RET$TO$CONT routine
+
+
+STR$TO$A:
+;
+; [E5.26]
+;
+; Converts the string pointed to by HL to a number in the A reg.
+; The conversion will continue until the first non-numeric chr
+; found.
+;
+; NOTE: a test for register overflow is not made.  If HL points
+; to a string whose numerical value is greater than 255, inaccurate
+; results will occur.
+;
+; Entry:
+;	HL = ptr to string
+;
+; Exit:
+;	A  = value of string in HL
+;	HL = next character to process
+;
+; Modifies:
+;	A, HL
+;
+	PUSH	BC			; We need the BC register
+	XOR	A			; Clear totals
+STA$NEXT$CHR:
+	LD	C,A			; Save results so far . . .
+	LD	A,(HL)			; Get chr
+	CP	'0'			; Less than '0'?
+	JR	C,NA$DIG		; Yes, finished
+	CP	'9'+1			; Greater than '9'
+	JR	NC,NA$DIG		; Yes, finished
+	SUB	'0'			; No,  convert to 0-9
+	LD	B,A			; Save this digit
+	XOR	A			; Multiply previous by 10
+	ADD	A,C			; x1
+	ADD	A,A			; x2
+	ADD	A,A			; x4
+	ADD	A,C			; x5
+	ADD	A,A			; x10
+	ADD	A,B			; Add in new digit
+	INC	HL			; Bump to next chr
+	JP	STA$NEXT$CHR		; Go back for another digit
+NA$DIG:
+	LD	A,C			; Get totals
+	OR	A			; Set Z/NZ flag
+	POP	BC			; Get old BC reg back
+	RET				; Return with results in A.
+
+
+STR$TO$DE:
+;
+; [E5.26]
+;
+; Converts the string pointed to by HL to a number in the DE reg.
+; The conversion will continue until the first non-numeric chr
+; found.
+;
+; NOTE: a test for register overflow is not made.  If HL points
+; to a string whose numerical value is greater than 65535 (64K),
+; inaccurate results will occur.
+;
+; Entry:
+;	HL = ptr to string
+;
+; Exit:
+;	DE = value of string in HL
+;	HL = next character to process
+;
+; Modifies:
+;	DE, HL
+;
+;
+	PUSH	AF			; We need the A register
+	PUSH	BC			; .  and the BC register
+	LD	DE,0			; Clear totals
+STN$NEXT$CHR:
+	PUSH	DE			; Save results so far . . .
+	POP	BC			; .
+	LD	A,(HL)			; Get chr
+	CP	'0'			; Less than '0'?
+	JR	C,NO$DIG		; Yes, finished
+	CP	'9'+1			; Greater than '9'
+	JR	NC,NO$DIG		; Yes, finished
+	SUB	'0'			; No,  convert to 0-9
+	LD	E,A			; Save this digit
+	LD	D,0			; .
+	PUSH	HL			; Save ptr to input string
+	LD	HL,0			; Multiply previous by 10
+	ADD	HL,BC			; x1
+	ADD	HL,HL			; x2
+	ADD	HL,HL			; x4
+	ADD	HL,BC			; x5
+	ADD	HL,HL			; x10
+	ADD	HL,DE			; Add in new digit
+	EX	DE,HL			; Save results back to DE
+	POP	HL			; Get input string ptr back
+	INC	HL			; Bump to next chr
+	JP	STN$NEXT$CHR		; Go back for another digit
+NO$DIG:
+	POP	BC			; Get old BC reg back
+	POP	AF			; .  and old A reg as well.
+	RET				; Return with results in DE.
+
+
+TO$UPPER:
+;
+; [E1.08]
+;
+; Convert the character in A to upper case.
+;
+; Entry:
+;	A  = character to convert
+;
+; Exit:
+;	A  = upper case character (if alpha)
+;
+; Modifies:
+;	A
+;
+	CP	'z'+1			; Convert to upper case
+	JP	P,UPPER$ALREADY		; .
+	CP	'a'			; .
+	JP	M,UPPER$ALREADY		; .
+	AND	5FH			; .
+UPPER$ALREADY:
+	RET				; and return
+
+
+WAIT:
+; Wait A ms
+;
+; Entry:
+;	milliseconds in A
+;
+; Exit:
+;	time waited
+;
+; Modifies: A
+;
+	PUSH	AF
+	LD	A,221
+WAIT$2:	DEC	A
+	JP	NZ,WAIT$2
+	POP	AF
+	DEC	A
+	JP	NZ,WAIT
+	RET
+
+
+; * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+;							*
+;		Data area (use DS or EQU)		*
+;							*
+; * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+
+;
+;
+; scsi command block
+;
+SCSICMD:	DB	SREAD		; 
+		DB	0		; high address
+		DB	0		; middle address
+LOWADDR:	DB	0		; low address
+		DB	1		; number of sectors=1
+		DB	0		; reserved
+;
+; Replicated BIOS to make direct calls easier . . .
+;
+LB$BIOS$TBL:
+LB$WBOOT:	DS	3		; Warm boot
+LB$CONST:	DS	3		; Console status
+LB$CONIN:	DS	3		; Console input
+LB$CONOUT:	DS	3		; Console output
+LB$LISTOUT:	DS	3		; List output
+LB$PUNCH:	DS	3		; Punch output
+LB$READER:	DS	3		; Reader input
+LB$HOMDSK:	DS	3		; Home disk (move to track 00)
+LB$SELDSK:	DS	3		; Select disk drive
+LB$SETTRK:	DS	3		; Select track number
+LB$SETSEC:	DS	3		; Select sector number
+LB$SETDMA:	DS	3		; Set DMA address
+LB$DSKREAD:	DS	3		; Disk read
+LB$DSKWRITE:	DS	3		; Disk write
+LB$LISTST:	DS	3		; List status
+LB$SECTRN:	DS	3		; Sector translate routine
+; AMPRO-specific BIOS calls
+LB$GETNXT:	DS	3		; Get bios ver & next tbl address
+LB$GETEDSK:	DS	3		; Get pointer to E-disk storage
+LB$IOINIT:	DS	3		; Set new I/O parameters
+LB$SCSIDRV:	DS	3		; SCSI direct driver
+LB$LEN	EQU	$-LB$BIOS$TBL
+
+LB$XTBL:				; 'Extra' table definitions ...
+LB$SWAP$DRV:	DS	3		; Swap two logical drives
+LB$HD$INFO:	DS	3		; Get HD pointers
+LB$PHYTAB:	DS	3		; Set/get phytab access
+LB$GETLOGICAL:	DS	3		; Get logical device table entry
+LB$RESERVED:	DS	3		; Reserved entry
+LB$XLEN EQU	$-LB$XTBL
+;
+		DS	64		; 64 byte stack area
+STACK:		DS	2
+;
+BTSEC:		DS	512		
+;
+USER$TAB:
+UDPBASE:	DS	256		; user's dpbase
+UPHYTAB:	DS	64		; user's phytab
+UHDDPB:		DS	176		; user's hd dpb's
+UHDAVAL:	DS	12		; user's hd$avl$avail values
+BYTEBLK:	DS	1		; SCSI controller byte, block value
+		DS	3		; pad to 512 bytes (1 SCSI sector)
+;
+IBUFL		EQU	128		; Input buffer length
+INBUF:		DS	IBUFL		; Command line input buffer
+OBPLUG:		DS	1		; Start of outbuf ('$')
+OBUFL		EQU	PWIDTH		; Output buffer length
+OUTBUF:		DS	OBUFL		; Output buffer
+;
+	END

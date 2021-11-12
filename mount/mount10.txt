@@ -1,0 +1,153 @@
+.oj off
+.uj off
+                              MOUNT
+                              =====
+(or, How to have your large Hard Drive and keep your big TPA too)
+
+                        Wayne Hortensius
+                       September 28, 1989
+
+One of the long standing problems with having a large hard drive 
+on a CP/M system is the amount of RAM the disk buffers remove 
+from your TPA. MOUNT is my attempt to rectify this situation.
+
+As the title implies, MOUNT reduces the amount of buffer space 
+required to use a large hard drive. It does this at a price; the 
+total capacity of your hard drive is never _simultaneously_ on 
+line.
+
+To illustrate what MOUNT can do, take my situation. I recently 
+moved up from an old 18Meg IMI drive to a barely used 40Meg ST- 
+251N. The reason I bought such a large drive was that it was 
+cheaper than buying a new 20Meg ST-225N. Initially, I created the 
+same two 8Meg partitions that I'd been using on the IMI, and was 
+quite happy.
+
+Until late at night, when little voices would whisper seductively 
+in my ear of the benefits of using more of the drive. And I'd 
+whisper right back that I'd be durned if I was going to sacrifice 
+another couple of K of the top of my already too small TPA space. 
+And then it hit me.
+
+By adjusting the number of reserved tracks for the B: partition, 
+I could use different areas on the drive. As long as the drive 
+was relogged each time it was moved, the allocation vector would 
+never get messed up, and I'd have more disk space using the same 
+amount of buffer space. Effectively what I'd be doing would be 
+emulating changing disks in a floppy drive.
+
+And so MOUNT was born. MOUNT takes a single parameter; the number 
+of the hard drive "volume" you want mounted. MOUNT selects the 
+drive, and adjusts the number of reserved tracks in the drive's 
+Disk Parameter Block to point to your selected area. The drive is 
+relogged to rebuild the allocation vector, and you're done. Up to 
+8Meg of new storage on line.
+
+MOUNT will also report on the current volume you have mounted. 
+Simply run MOUNT with no parameters, and the volume number that 
+is currently mounted will be displayed. Also, if your directory 
+contains an MP/M style directory label, the string contained in 
+the filename entry of the label will be displayed (this is also 
+displayed when the volume is mounted). It won't hurt anything if 
+MOUNT doesn't find a label, but I think it's a nice feature.
+
+MOUNT also knows about BDOS replacements like NOVAdos that 
+implement fast disk relogging, and momentarily turns this feature 
+off in order to recalculate the allocation vector.
+.pa
+What's in this library:
+-----------------------
+
+.pm 1
+.lm 15
+MOUNT10.COM - MOUNT assembled for a 40Meg drive, one 1024 track 
+              fixed partition + 2 system tracks, and 4 1024 track 
+              mountable volumes, and NOVAdos disabled
+MOUNT10.DOC - this file
+MOUNT10.FOR - FOR file for BBSes
+MOUNT10.MAC - M80 source code to MOUNT10
+
+.lm 1
+What you need to run MOUNT:
+---------------------------
+
+.pm 1
+.lm 4
+1) MOUNT itself, of course.
+
+2) A hard drive with at least 20Meg of storage. There's nothing 
+   to stop you from using MOUNT on a small hard drive, or even a 
+   floppy, but the savings in buffer space would not make it 
+   worth it.
+
+3) some way of patching MOUNT to configure it to your hard drive 
+   partitions, or M80, L80 and SYSLIB.REL to reassemble and link 
+   MOUNT.
+
+.lm 1
+MOUNT comes configured for a 40Meg hard drive, with an 8Meg A: 
+fixed partition, and an 8Meg mountable partition, with 4 volumes 
+of 8Meg each mountable in it. There are two system tracks on my 
+hard drive, and each 8Meg hard drive occupies 1024 tracks. If 
+your hard drive matches that, you can use the stock MOUNT.COM.
+
+If,more likely, you have another configuration, there's a patch 
+area built into the front of MOUNT. The patchable values are:
+
+Byte      Offset    Description
+----      ------    -----------
+.pm 1
+.lm 21
+10BH        0BH     mountable partition letter 'A' thru 'P' in 
+                    ASCII
+10CH        0CH     # of mountable volumes, 1 thru 255 (though 1 
+                    is pretty silly)
+10DH-10EH   0DH     the number of tracks in each mountable volume
+10FH-110H   0FH     the starting track of the mountable partition
+111H        11H     NOVAdos flag - when non-zero, MOUNT is turns 
+                    off NOVAdos' fast disk relogging (if enabled) 
+                    when a new volume is mounted
+
+.lm 1
+A note about fast disk relogging; NOVAdos allows you to change 
+whether this happens or not on the fly via a BDOS call. It does 
+not appear that another popular BDOS replacement, Z80DOS, does. 
+Z80DOS seems to always have fast disk relogging enabled, with no 
+way to turn it off. Perhaps someone more familiar will be able to 
+see a way to do this and release a mod to MOUNT that will support 
+Z80DOS as well.
+
+MOUNT uses BDOS function 13 (reset all disks) to relog the 
+mounted disk rather than BDOS function 37 (reset multiple disks).
+There is apparently a bug in the standard CP/M 2.2 BDOS that 
+doesn't allow the currently logged in drive to be reset with BDOS 
+37. Using BDOS 13 is slower, but safer.
+
+A note on MP/M directory labels
+-------------------------------
+
+Whenever MOUNT mounts a new volume, it searches the directory for 
+an MP/M style directory label. If it finds one, it prints out the 
+11 bytes in the filename and extension as a volume label.
+
+The way I create a directory label is I cheat. Create a 0 length 
+file with the command: SAVE 0 MPMLABEL.FIL. Use DU, or your 
+favourite directory editor, to locate the string MPMLABELFIL in 
+the directory. Change the byte immediately before the string to a 
+hexadecimal 20 (a space character). Change the 11 bytes of the 
+string to your desired volume label. Free free to use spaces and 
+lower case, but STAY WITHIN THE 11 CHARACTERS! Write your changes 
+back to the directory, and you're done.
+
+A short utility to automate the creation of a directory label 
+should be a fairly easy project; any takers?
+
+The Fine Print
+--------------
+
+MOUNT is released, including source code, to the public domain, 
+because sharing ideas is what got the micro computer community 
+where we are today, of course. Do with it as you please. If you 
+try and pass it off as your own work, may your conscience haunt 
+you for the rest of your life, and may your hard drive develop 
+bad sectors in the middle of your directory tracks!

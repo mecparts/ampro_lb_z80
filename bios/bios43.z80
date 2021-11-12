@@ -1,0 +1,3815 @@
+	;ABS
+; * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+; *								*
+; *  AMPRO Computers, Inc.			BIOS Version 4  *
+; *								*
+; *	        Copyright (C) 1983,1984,1985,1986               *
+; *                    AMPRO Computers, Inc.                    *
+; *			All rights reserved.			*
+; *								*
+; *  This BIOS is designed for use with AMPRO hardware only.	*
+; *  All other use is prohibited without prior written consent	*
+; *  from AMPRO Computers, Inc.					*
+; *								*
+; * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+;
+; Floppy-related features:
+;
+;   o	Automatic sensing of 4 AMPRO formats
+;
+;   o	Automatic 48tpi (double-stepping) support in 96tpi drives.
+;	WARNING:  writes are allowed, but not recommended.
+;
+;   o	"E-drive" supports wide variety of non-AMPRO formats
+;
+;   o	Console beeps on attempt to read/write a drive without a
+;	floppy in it, but only on first access since CTRL-C.
+;
+;   o	A step rate per physical drive is now supported, and 2ms and
+;	3ms step rates are supported with the 1772 FDC.
+;
+;   o	8" data rates implemented on a per logical drive basis.
+;	NOTE: Most 1770/1772 FDC chips cannot support this rate.
+;
+; Hard-disk related features:
+;
+;   o	Hard disk support is SCSI generic and installed by HINIT
+;	as a run-time option, or by boot EPROM after use of HGEN.
+;
+;   o	Bus (SCSI) arbitration is an assembly-time option.
+;
+;   o	Each hard disk partition has its own DPB, which allows
+;	flexible partitioning of any disk drive, up to 88Mb.
+;
+;   o	A direct SCSI call is available as an extended BIOS JMP.
+;
+;   o	A SCSI burst/byte option allows some controllers to 
+;	operate at optimum rates.  Set by HINIT.
+;
+; Other features:
+;
+;   o	Generic ZCPR3 support.  Easily extendable via the AMPRO 
+;	EXTENDED ZCPR3 PACKAGES. 
+;
+;   o	Buffered serial I/O, via interrupts.
+;
+;   o   Real time NOVAdos compatible clock, via interrupts.
+;
+;	*	*	*	*	*	*	*	*
+;
+;  Revision history:
+;
+;  Ver	Date	Who	Description
+;  ---	-----	---	------------------------------------------
+;  4.3  210816  SWH     - Update Z3ENV
+;			- Rearrange SIO register initialization
+;			  sequence and get SIO statii properly updated
+;			  at power up
+;			- Put PiGFX terminal into Wordstar mode at
+;			  power up
+;
+;  4.2	900326	SWH	- interrupt driven serial output for chan B
+;			(for increased throughput at high baud rates)
+;
+;  4.1	900213	SWH	Clock routine now 1 second interrupt
+;			Interrupt driven serial input
+;			Interrupts disabled during disk I/O
+;			Parity bit not stripped from reader input
+;			Extended BIOS calls for reader input status,
+;			punch output status, sending BREAK to modem
+;			
+;  4.0  890504  SWH     Converted to Z80 mnemonics
+;			Clock routine changed for NOVAdos
+;			Removed conditional assembly stuff I didn't use
+;			Corrected potential bug around SBOOT label
+;
+;  3.8  F4.10   FSW	Now include Initiator SCSI ID in select.
+;			Added SCSI I/O retries.
+;  			Added buffered console and RTC options.
+;			Added local stack for above two options.
+;			Fixed problem in SELEND routine. 
+;			Various speed ups and clean ups. 
+;			BEEP is now an option.
+;			improved WBOOT option for ZRDOS+.
+;			Now clear PUBLIC bytes for ZRDOS+.
+;
+;  3.5 - 3.7		Internal unreleased versions
+;
+;  3.4	EA.30	RJB	Moved SCSI mode byte out of buffer area.
+;		RBL	Added bios hooks for ZCPR3 IOP.  Added
+;			floppy control parameters to cold boot
+;			code.  Set "startup" as standard cold boot
+;			command (AUTOCMD).  Modified SCSI routines
+;			to provide better internal status when in
+;			a multi-master environment.  Changed SCSI
+;			bus reset to assembly option (new SCSI 
+;			boot EPROM does it -- if BIOS does it
+;			again, problems can occur.)
+;
+;  3.3	E8.21	RJB	Changed RESTORE logic to wait longer for
+;			the FDC to setup.  Corrected sector number
+;			problem with Kaypro 4/10 format.  Added
+;			routine to set memory from the end of BIOS
+;			thru 0FFFFH to zero in order to support
+;			ZCPR3 resident system segment options (RCP
+;			FCP, IOP, etc).
+;
+;  3.2	E7.30	RJB	Removed 2 nested "IF" statements in the 
+;			hard disk section which generated extra 
+;			(unused) code in the floppy-only version.
+;			NO FUNCTIONAL CHANGES.
+;
+;  3.1	E7.02	RJB	Production release of version 3 bios.
+;
+;  3.0	E5.21	RJB	Beta release of version 3 bios.
+;
+;	*	*	*	*	*	*	*	*
+; Bios version and date
+
+VERS		EQU	43		; Current version
+
+; Customization equates:
+
+		; The following equate determines the amount of system memory 
+		; available for hard disk buffers and other options:
+MSIZE	EQU	58
+		; 59K = Floppy + 10Mb Hard
+		; 58K = Floppy + 42Mb Hard
+		; 57K = Floppy + 74Mb Hard
+		; 56K = Floppy + 88Mb Hard
+
+KEYSIZE	EQU	64		; size of keyboard serial input buffer (<256)
+MdmIsize	equ	170	; size of modem serial input buffer (<256)
+MdmOsize	equ	170	; size of modem serial output buffer (<256)
+
+; CP/M internals
+
+BIAS		EQU	(MSIZE-20)*1024	; CP/M bias
+CCP		EQU	3400H+BIAS	; CCP  starting address
+BDOS		EQU	CCP+806H	; BDOS starting address
+BIOS		EQU	CCP+1600H	; BIOS starting address
+NSECTS		EQU	(BDOS-CCP)/128	; warm boot sector count
+
+; CP/M externals
+
+CDISK		EQU	0004H		; Current disk: 0=A,...,15=P
+IOBYTE		EQU	0003H		; Intel I/O byte
+
+; CP/M to host disk constants
+
+WRALL		EQU	0		; Write to allocated
+WRDIR		EQU	1		; Write to directory
+WRUAL		EQU	2		; Write to unallocated
+
+; Ampro hardware port equates
+
+CONT	EQU	00H		; Ampro system control port
+
+PIO1	EQU	001H		; Parallel printer
+STBSET	EQU	002H		; Set print strobe
+STBCLR	EQU	003H		; Clear print strobe
+
+CTCA0	EQU	040H		; Clock/timer channel 0
+CTCA1	EQU	050H		; Clock/timer channel 1
+CTCA2	EQU	060H		; Clock/timer channel 2
+CTCA3	EQU	070H		; Clock/timer channel 3
+
+SIODPA	EQU	080H		; Serial port A - data
+SIOCPA	EQU	084H		; Serial port A - control
+SIODPB	EQU	088H		; Serial port B - data
+SIOCPB	EQU	08CH		; Serial port B - control
+
+CMND	EQU	0C0H		; Disk controller command
+WTRK	EQU	CMND+1		; Disk controller write track
+WSEC	EQU	CMND+2		; Disk controller write sector
+WDAT	EQU	CMND+3		; Disk controller write data
+
+STAT	EQU	0C4H		; Disk controller status
+RTRK	EQU	STAT+1		; Disk controller read track
+RSEC	EQU	STAT+2		; Disk controller read sector
+RDAT	EQU	STAT+3		; Disk controller read data
+
+; DART masks
+
+RDA	EQU	01H		; DART recieve data available
+TBE	EQU	04H		; DART transmit buffer empty
+DCD	EQU	08H		; DART data carrier detect
+PRTRDY	EQU	10H		; Printer BUSY line
+CTS	EQU	20H		; DART clear to send
+
+; FDC masks, commands, and constants
+
+FRESTOR EQU	008H		; FDC restore
+FSEEKNV EQU	018H		; FDC seek, no verify
+FSEEK	EQU	01CH		; FDC seek, with verify
+FREADS	EQU	088H		; FDC read sector
+FWRITES EQU	0A8H		; FDC write sector
+FRDADDR EQU	0C8H		; FDC read address
+
+FNS	EQU	008H		; 0=spin-up,   1=no spin-up
+FVF	EQU	004H		; 0=no verify, 1=verify
+FNP	EQU	002H		; 0=precomp,   1=no precomp
+
+FRETRY	EQU	3		; Number of floppy retries
+HLDELAY EQU	35		; Head load delay (ms)
+DSBIAS	EQU	16		; Double sided sector bias
+
+; Disk type byte definitions:
+
+		; 	   Bit: 76543210
+		; Density	x	   0=single     1=double
+		; Sides		 x	   0=single     1=double
+		; Sector #'s	  x	   0=same       1=continuous
+		; Track count	   x	   0=down       1=down front, up back
+		; Alloc unit	    xx	   00=1K   01=2K   10=4K   11=8K
+		; Sector size	      xx   00=128  01=256  10=512  11=1024
+		; 	   Bit: 76543210
+
+SSDD48	EQU	10000110B	; DD,SS,same,down,2K,512
+DSDD48	EQU	11000110B	; DD,DS,same,down,2K,512
+SSDD96	EQU	10000111B	; DD,SS,same,down,2K,1024
+DSDD96	EQU	11000111B	; DD,DS,same,down,2K,1024
+
+;  NCR controller equates
+
+NCRBASE EQU	20H		; Base address of NCR 5380
+NCRCSD	EQU	NCRBASE+0	; (R)  Current SCSI data register
+NCRODR	EQU	NCRBASE+0	; (W)  Output data register
+NCRICR	EQU	NCRBASE+1	; (RW) Initiator command register
+NCRMR	EQU	NCRBASE+2	; (RW) Mode register
+NCRTCR	EQU	NCRBASE+3	; (RW) Target command register
+NCRCSBS EQU	NCRBASE+4	; (R)  Current SCSI bus status
+NCRSER	EQU	NCRBASE+4	; (W)  Select enable register
+NCRBSR	EQU	NCRBASE+5	; (R)  Bus & status register
+NCRSDS	EQU	NCRBASE+5	; (W)  Start DMA send
+NCRIDR	EQU	NCRBASE+6	; (R)  Input data register
+NCRSDTR EQU	NCRBASE+6	; (W)  Start DMA target receive
+NCRRPI	EQU	NCRBASE+7	; (R)  Reset parity/interrupt
+NCRSDIR EQU	NCRBASE+7	; (W)  Start DMA initiator receive
+NCRDACK EQU	NCRBASE+8	; (RW) DACK pseudo-DMA register
+
+BSYBIT	EQU	08H
+ERROR	EQU	02H
+
+; Current SCSI bus status (NCRCSBS)
+
+NCRRST	EQU	10000000B	; Reset
+NCRBSY	EQU	01000000B	; Busy
+NCRREQ	EQU	00100000B	; Request
+NCRMSG	EQU	00010000B	; Message
+NCRCD	EQU	00001000B	; Control/Data
+NCRIO	EQU	00000100B	; Input/Output
+NCRSEL	EQU	00000010B	; Select
+NCRDBP	EQU	00000001B	; Data bus parity
+
+; Character equates
+
+CTRLC	EQU	'C'-'@'		; Ctrl-C (Break, abort)
+BELL	EQU	'G'-'@'		; Ctrl-G (Bell)
+BSP	EQU	'H'-'@'		; Ctrl-H (Backspace)
+TAB	EQU	'I'-'@'		; Ctrl-I (Tab)
+LF	EQU	'J'-'@'		; Ctrl-J (Line feed)
+CR	EQU	'M'-'@'		; Ctrl-M (Carriage return)
+NAK	EQU	'U'-'@'		; Ctrl-U
+CAN	EQU	'X'-'@'		; Ctrl-X (Cancel)
+ESC	EQU	1BH		; Ctrl-[ (Escape)
+DEL	EQU	7FH		; 	 (Delete)
+
+; Other equates
+
+DELSEND EQU	28
+DDLSPT	EQU	40
+
+; ZCPR3 equates
+
+Z3REV	EQU	33		; ZCPR 3.3
+
+EXTSTK	EQU	0FFD0H		; Z3 external stack
+
+Z3CL	EQU	0FF00H		; Z3 command line buffer
+Z3CLS	EQU	200		; Size in bytes
+
+Z3ENV	EQU	0FE00H		; Z3 environment descriptor
+Z3ENVS	EQU	2		; Size in 128-byte blocks
+
+EXTFCB	EQU	0FDD0H		; Z3 external FCB
+
+Z3MSG	EQU	0FD80H		; Z3 message buffers
+
+SHSTK	EQU	0FD00H		; Shell stack
+SHSTKS	EQU	4		; Number of shell elements
+SHSIZE	EQU	32		; Size of a shell entry
+
+Z3NDIR	EQU	0FC00H		; Named directory area
+Z3NDIRS EQU	14		; Size in 18-byte blocks
+
+FCP	EQU	0F900H		; Flow command package
+FCPS	EQU	6		; Size in 128-byte blocks
+
+RCP	EQU	00000H		; Resident command package
+RCPS	EQU	0		; Size in 128-byte blocks
+
+IOP	EQU	00000H		; Redirectable I/O package
+IOPS	EQU	0		; Size in 128-byte blocks
+
+EXPATH	EQU	40H		; Location of exernal path
+EXPATHS EQU	5		; 5 2-byte path elements
+
+Z3WHL	EQU	4BH		; Wheel byte location
+
+Z3BASE	EQU	0F900H
+;	*	*	*	*	*	*	*	*
+;
+;		C A V E A T    E M P T O R
+;
+;  WARNING: The address offsets from BIOS thru BIOS+017FH must remain
+;  the same.  Any changes in these offsets will cause incompatibility
+;  with the AMPRO system utilities.
+;
+;		  YOU HAVE BEEN WARNED ...
+;
+;	*	*	*	*	*	*	*	*
+
+	ORG	BIOS		; Bios starting location
+
+	JP	BOOT		; Cold start
+WBOOTE:	JP	WBOOT		; Warm start
+	JP	CONST		; Console status
+	JP	CONIN		; Console character in
+	JP	CONOUT		; Console character out
+	JP	LSTOUT		; List character out
+	JP	PUNCH		; Punch character out
+	JP	READER		; Reader character in
+	JP	HOME		; Seek to home position
+	JP	SELDSK		; Select disk
+	JP	SETTRK		; Set track number
+	JP	SETSEC		; Set sector number
+	JP	SETDMA		; Set DMA address
+	JP	READ		; Read disk
+	JP	WRITE		; Write disk
+	JP	LISTST		; Return list status
+	JP	SECTRAN		; Sector translate
+
+; Ampro specific bios calls
+
+	JP	GETTBL		; Point to more jumps
+	JP	GETEDSK		; Get ptr to E-disk table
+	JP	IOINIT		; Set new I/O parameters
+	JP	SCSI		; SCSI direct driver
+
+;	*	*	*	*	*	*	*	*
+;
+;  Current system disk
+;
+;	*	*	*	*	*	*	*	*
+	ORG	BIOS+03FH
+SYSDSK:	DEFB	0		; Assume A: for now
+	
+; NOTE:   BIOS+040H thru BIOS+07FH modified by CONFIG
+;	*	*	*	*	*	*	*	*
+;
+;  Initialization parameters for the CTC and DART/SIO
+;
+;  These values are set by the CONFIG program, and specify the
+;  CTC and DART/SIO initialization parameters.  Each CTC channel
+;  requires two bytes of initialization, while each DART/SIO 
+;  channel may have up to 10 bytes of initialization information.
+;
+;	*	*	*	*	*	*	*	*
+	ORG	BIOS+040H
+CTCVAL:	
+CTC0:	DEFB	03H,3		; ctc0 - SIO A channel baud rate (38.4K)
+CTC1:	DEFB	47H,13		; ctc1 - SIO B channel baud rate (9600)
+CTC2:	DEFB	25H,125		; ctc2 \ source of 1 second interrupt
+CTC3:	DEFB	0D5H,125	; ctc3 / for NovaDOS real time clock
+
+SIOAVAL:			; DART/SIO channel A - terminal
+	DEFB	18H		; reset channel
+	DEFB	4 + 10H		; reset ext/status interrupts
+SIOAR4:	DEFB	01000100b	; x16 clock, 1 stop bit, no parity 	
+	DEFB	3
+SIOAR3:	DEFB	11000001b	; Rx 8 bits/char, Rx enabled
+	DEFB	5
+SIOAR5:	DEFB	01101010b	; HIBAUD, Tx 8 bits/char, TX enabled, RTS
+	DEFB	1 + 10H		; reset ext/status interrupts
+SIOAR1:	DEFB	00011101b	; interrupt on all Rx chars (parity no effect)
+				; interrupt on status/external
+				; status affects vector
+SIOALNG	EQU	$-SIOAVAL
+
+SIOBVAL:			; DART/SIO channel B - modem
+	DEFB	18H		; reset channel
+	DEFB	2
+SIOBR2:	DEFB	SIOINT & 255	; interrupt vector table address
+	DEFB	4 + 10H		; reset ext/status interrupts
+SIOBR4:	DEFB	01000100b	; x16 clock, 1 stop bit, no parity 	
+	DEFB	3
+SIOBR3:	DEFB	11000001b	; Rx 8 bits/char, Rx enabled
+	DEFB	5
+SIOBR5:	DEFB	11101010b	; FDCRST, Tx 8 bits/char, TX enabled, RTS
+	DEFB	1 + 10H		; reset ext/status interrupts
+SIOBR1:	DEFB	00011111b	; interrupt on all Rx chars (parity no effect)
+				; interrupt on transmitter buffer empty
+				; interrupt on status/external
+				; status affects vector
+SIOBLNG	EQU	$-SIOBVAL
+
+;	*	*	*	*	*	*	*	*
+;
+;  Maximum drive letter available:
+;
+;  This value is installed by the CONFIG program, and is used by
+;  the SELECT routine (optionally) to avoid selecting any disk 
+;  units above the maximum letter.  This variable was previously
+;  the NDSKS (# of floppy disks available) parameter in the 1.x
+;  and 2.x bios.
+;
+;  Note: Although this parameter is set with the CONFIG utility,
+;  it is ignored unless the MAX$DRIVE parameter is set to YES.
+;
+;	*	*	*	*	*	*	*	*
+	ORG	BIOS+05CH
+MAX$DRV$LTR:
+	DEFB	'G'-'A'		; Allow drives A-G
+
+;	*	*	*	*	*	*	*	*
+;
+;  Step rates for the four floppy drives.
+;
+;  These values are set by the CONFIG program.
+;
+;	*	*	*	*	*	*	*	*
+	ORG	BIOS+05DH
+STPRAT:
+	DEFB	3,3,3,3		; Initial rates = 3ms
+
+;	*	*	*	*	*	*	*	*
+;
+;  Initial IOBYTE value
+;
+;  This value is set by the CONFIG program, and is used as the
+;  initial value for the IOBYTE (location 0003H) on cold boot.
+;
+;  CP/M defines the following IOBYTE devices:
+;
+;  Bit: 76543210
+;	      xx  Console (0=TTY:, 1=CRT:, 2=BAT:, 3=UC1:)
+;	    xx	  Reader  (0=TTY:, 1=PTR:, 2=UR1:, 3=UR2:)
+;	  xx	  Punch   (0=TTY:, 1=PTP:, 2=UP1:, 3=UP2:)
+;	xx	  List    (0=TTY:, 1=CRT:, 2=LPT:, 3=UL1:)
+;
+;  In the AMPRO 3.0 bios, the devices are mapped to the serial
+;  and parallel ports as follows:
+;
+;  CRT: Serial Port A		All other devices are undefined.
+;  TTY:	Serial Port B		    UC1:  PTR:  UR1:  UR2:  
+;  LPT: Parallel port		    UL1:  PTP:  UP1:  UP2:  
+;
+;	*	*	*	*	*	*	*	*
+	ORG	BIOS+061H
+IOBYT:	DEFB	81H		; 10 00 00 01	Initial values:
+				; || || || ||
+				; || || ||  \= CON: Serial port A (CRT:)
+				; || ||  \==== RDR: Serial port B (TTY:)
+				; ||  \======= PUN: Serial port B (TTY:)
+				;  \========== LST: Parallel port (LPT:)
+
+;	*	*	*	*	*	*	*	*
+;
+;  AutoStart command
+;
+;  This value is set by the CONFIG program, and is used as the
+;  initial command to ZCPR3.  This command is ignored in the CP/M
+;  CCP.
+;
+;  The format of this region is:
+;
+;  Command length -- 1 byte
+;  Command text   -- 8 bytes (max)
+;  Trailing zero  -- 1 byte
+;
+;	*	*	*	*	*	*	*	*
+	ORG	BIOS+062H
+AUTOCMD:
+	DEFB	8,'STARTUP ',0	; Cmd length + cmd + 0 terminator
+
+AUTCMD$END	EQU	$
+;	*	*	*	*	*	*	*	*
+;
+;  Handshake required flags for DART/SIO channels A and B
+;
+;  These values are set by the CONFIG program, and indicate if
+;  hardware handshaking is required for each of the two serial
+;  channels.  Bit zero (0) of each flag should be set to a one
+;  to indicate hardware handshaking.
+;
+;	*	*	*	*	*	*	*	*
+	ORG	BIOS+06CH
+HSA:	DEFB	1		; Handshake flag for channel A
+HSB:	DEFB	1		; Handshake flag for channel B
+	DEFB	0		; (Reserved)
+	DEFB	0		; (Reserved)
+
+;	*	*	*	*	*	*	*	*
+;
+;  Drive select bytes
+;
+;  These values are modified by the floppy drive select code, the
+;  warm boot code, and several "E" utilities.  The format of each
+;  select byte is as follows:
+;
+;		  Bit:	76543210
+;       Speed select	x		0=normal,  1=double
+;       Step select	 x		0=single,  1=double
+;       Disk density	  x		0=double,  1=single
+;       Side select	   x		0=Side 0,  1=Side 1
+;       Drive unit 4	    x		.
+;       Drive unit 3	     x		.  Select drive
+;       Drive unit 2	      x		.  unit 1,2,3,4
+;       Drive unit 1	       x	.
+;		  Bit:  76543210
+;
+;	*	*	*	*	*	*	*	*
+	ORG	BIOS+070H
+DRIVE$TYPES:
+	DEFB	01H		; Drive A:  DD, Unit 1
+	DEFB	02H		; Drive B:  DD, Unit 2
+	DEFB	04H		; Drive C:  DD, Unit 3
+	DEFB	08H		; Drive D:  DD, Unit 4
+	DEFB	02H		; Drive E:  DD, Unit 2
+	DEFB	0,0,0		; (Reserved)
+
+;	*	*	*	*	*	*	*	*
+;
+;  Reserved data area
+;
+;	*	*	*	*	*	*	*	*
+	ORG	BIOS+078H
+	DEFW	0,0,0,0
+
+;	*	*	*	*	*	*	*	*
+;
+;  Disk drive parameter headers
+;
+;  Physical drives A,B,C,D	Floppy drives
+;
+;  Physical drive  E		Special E-disk
+;
+;  Physical drives F,G		Hard disk drives
+;
+;	*	*	*	*	*	*	*	*
+	ORG	BIOS+080H
+DPBASE:
+	DEFW	XLTSS,0,0,0,DIRBUF,SPARM,CSVA,ALVA	; BIOS+80H
+	DEFW	XLTSS,0,0,0,DIRBUF,SPARM,CSVB,ALVB	; BIOS+90H
+	DEFW	XLTSS,0,0,0,DIRBUF,SPARM,CSVC,ALVC	; BIOS+A0H
+	DEFW	XLTSS,0,0,0,DIRBUF,SPARM,CSVD,ALVD	; BIOS+B0H
+	DEFW	XLTE1,0,0,0,DIRBUF,EPARM,CSVE,ALVE	; BIOS+C0H
+	DEFW	0,0,0,0,DIRBUF,FPARM,CSVF,ALVF		; BIOS+D0H
+	DEFW	0,0,0,0,DIRBUF,GPARM,CSVG,ALVG		; BIOS+E0H
+;	DEFW 	0,0,0,0,DIRBUF,HPARM,CSVH,ALVH		; BIOS+F0H
+;	DEFW 	0,0,0,0,DIRBUF,IPARM,CSVI,ALVI		; BIOS+100H
+;	DEFW 	0,0,0,0,DIRBUF,JPARM,CSVJ,ALVJ		; BIOS+110H
+;	DEFW 	0,0,0,0,DIRBUF,KPARM,CSVK,ALVK		; BIOS+120H
+;	DEFW 	0,0,0,0,DIRBUF,LPARM,CSVL,ALVL		; BIOS+130H
+;	DEFW 	0,0,0,0,DIRBUF,MPARM,CSVM,ALVM		; BIOS+140H
+;	DEFW 	0,0,0,0,DIRBUF,NPARM,CSVN,ALVN		; BIOS+150H
+;	DEFW 	0,0,0,0,DIRBUF,OPARM,CSVO,ALVO		; BIOS+160H
+;	DEFW 	0,0,0,0,DIRBUF,PPARM,CSVP,ALVP		; BIOS+170H
+;
+;----------- END OF STUFF BETTER LEFT ALONE -----------------------
+;
+	DEFW	0,0,0,0,0,0,0,0
+VECTORS:			; interrupt vectors, starting at BIOS+100H
+
+SIOINT:				; SIOINT lo address must be on even multiple
+				; of 16 (ie xxxx0000)	- BIOS + 100H
+	defw	mdmTxE		; Ch. B Tx buffer empty	- BIOS + 100H
+	defw	mdmsts		; Ch. B Ext/Status chng	- BIOS + 102H
+	defw	mdmchk		; Ch. B RX char avail	- BIOS + 104H
+	defw	mdmerr		; Ch. B Spcl Rx cond	- BIOS + 106H
+	defw	ei$reti		; Ch. A Tx buffer empty	- BIOS + 108H
+	defw	keysts		; Ch. A Ext/Status chng	- BIOS + 10AH
+	defw	KEYCHK		; Ch. A RX char avail	- BIOS + 10CH
+	defw	keyerr		; Ch. A Spcl Rx cond	- BIOS + 10EH
+
+CTCINT:				; CLCINT lo address must be on even multiple
+				; of 8 (ie xxxxx000)
+	defw	ei$reti		; CTC0 int. not used	- BIOS + 110H
+	defw	ei$reti		; CTC1 int. not used	- BIOS + 112H
+	defw	ei$reti		; CTC2 int. not used	- BIOS + 114H
+	defw	CLKCHK		; 1sec int from CTC3	- BIOS + 116H
+;
+SPARM:				; Ampro single sided 48tpi
+	DEFW	40		; Sectors/track
+	DEFB	4		; Block shift
+	DEFB	15		; Block mask
+	DEFB	1		; Extent mask
+	DEFW	94		; Disk size -1
+	DEFW	63		; Directory max
+	DEFB	128		; Allocation 0
+	DEFB	0		; Allocation 1
+	DEFW	16		; Check size
+	DEFW	2		; Offset       
+
+DPARM:				; Ampro double sided 48tpi
+				; -or-  single sided 96tpi
+	DEFW	40		; Sectors/track
+	DEFB	4		; Block shift  
+	DEFB	15		; Block mask  
+	DEFB	1		; Extent mask  
+	DEFW	194		; Disk size -1 
+	DEFW	127		; Directory max
+	DEFB	192		; Allocation 0 
+	DEFB	0		; Allocation 1 
+	DEFW	32		; Check size   
+	DEFW	2		; Offset       
+
+QPARM:				; Ampro double sided 96tpi
+	DEFW	40		; Sectors/track
+	DEFB	4		; Block shift  
+	DEFB	15		; Block mask  
+	DEFB	0		; Extent mask  
+	DEFW	394		; Disk size -1 
+	DEFW	255		; Directory max
+	DEFB	240		; Allocation 0 
+	DEFB	0		; Allocation 1 
+	DEFW	64		; Check size   
+	DEFW	2		; Offset       
+
+XLTSS:				; Single sided format skew table
+	DEFB	1,2,3,4,5,6,7,8,9,10
+
+XLTDS:				; Double sided format skew table
+	DEFB	17,18,19,20,21,22,23,24,25,26
+
+
+;	*	*	*	*	*	*	*	*
+;
+;  Special user-defined drive		"E-disk"
+;
+;  NOTE: The order of the following table must not be changed,
+;	 since many existing utilities depend on this order.
+;
+;  A call to the BIOS function GETEDISK (BIOS+030H) returns the
+;  address of EPARM.  The type table entry is defined as the re-
+;  turned value -1, and the translate table value as the returned
+;  value +15.  The translate table has space for 20 entries in
+;  bios version 1 or 2, 26 entries in bios version 3+.
+;
+;	*	*	*	*	*	*	*	*
+ETYPE:	DEFB	82H		; ETYPE must be at EPARM - 1
+EPARM:				; Set for:	KAYPRO 
+	DEFW	40		; SEC/TRK   	KAYPRO IS 40
+	DEFB	3		; BLOCK SHIFT
+	DEFB	7		; BLOCK MASK
+	DEFB	0		; EXTENT MASK
+	DEFW	194		; DISK SIZE -1 	KAYPRO IS 194
+	DEFW	63		; DIRECTORY MAX -1
+	DEFB	240		; ALLOC 0 	KAYPRO 240
+	DEFB	0		; ALLOC 1
+	DEFW	16		; CHECK SIZE
+	DEFW	1		; OFFSET 	KAYPRO IS 1
+
+EDSD:
+	DEFB	1		; DEFAULT DRIVE B:
+
+XLTE1:				; TRANSLATE TABLE FOR E DISK
+	DEFB	0,1,2,3,4,5,6,7,8,9
+
+	DEFW	0,0,0,0,0,0,0,0	; 26 entries max in XLT1
+
+
+
+
+;  End of E-disk user defined table
+;	*	*	*	*	*	*	*	*
+;
+;  GETTBL	GET NEXT JUMP TABLE ADDRESS
+;
+;  While this routine returns the address of NXTTBL, it can also
+;  be used to identify the BIOS version level.
+;
+;  For pre-2.0 systems, the A register is returned unchanged,
+;  and the HL register pair returned 0FFFFH.
+;
+;  For 2.0 and higher, HL returns the address of NXTTBL (never
+;  equal to 0FFFFH), and A contains the assembly version of this
+;  bios code.
+;
+;	*	*	*	*	*	*	*	*
+GETTBL:
+	LD	HL,NXTTBL	; Get address of jump table
+	LD	A,VERS		; .  and version number
+NXTJMP:				; Label for dummy routines
+	RET
+
+NXTTBL:
+	JP	SWAP		; +00H Swap two logical drives
+	JP	HD$INFO		; +03H Get HD table information
+	JP	PHTBAC		; +06H Get/set PhyTab access
+	JP	PAGET		; +09H Get PhyTab entry address
+	JP	TOD		; +0CH Get/set system time
+	jp	TTYIST		; +0FH modem input status
+	jp	TTYOST		; +12H modem output status
+	jp	TTYBRK		; +15H send 300mS break to modem
+	jp	CONPEEK		; +18H console input peek
+	JP	NXTJMP		; +1BH RESERVED ENTRY
+
+;	*	*	*	*	*	*	*	*
+;
+;  GETEDSK	Get E-disk pointer
+;
+;	*	*	*	*	*	*	*	*
+GETEDSK:
+	LD	HL,EPARM
+	RET
+
+;	*	*	*	*	*	*	*	*
+;
+;  IOINIT
+;
+;  Initialize the CTC and DART comm devices according to the
+;  information provided at BIOS + 40 hex.
+;
+;  Entry from BOOT and also via the JMP IOINIT from the BIOS jump
+;  table.
+;
+;	*	*	*	*	*	*	*	*
+IOINIT:
+	di
+	ld	a,CTCINT & 0FFH	; NOTE: CTCINT address low byte must
+				; be of form xxxxx000
+	out	(CTCA0),a	; initialize ctc interrupts
+	LD	HL,CTCVAL
+	LD	BC,2*256+CTCA0	; Initialize CTC0
+	OTIR
+	LD	BC,2*256+CTCA1	; Initialize CTC1
+	OTIR
+	LD	BC,2*256+CTCA2	; Initialize CTC2
+	OTIR
+	LD	BC,2*256+CTCA3	; Initialize CTC3
+	OTIR
+	LD	BC,SIOALNG*256+SIOCPA; Initialize DART channel A
+	OTIR
+	LD	BC,SIOBLNG*256+SIOCPB; Initialize DART channel B
+	OTIR
+	ei
+	RET
+
+;	*	*	*	*	*	*	*	*
+;
+;  SWAP		Swap logical drives
+;
+;  Entry here causes the two LOGICAL drives identified in B and C
+;  to be swapped in position.  This alters the current LOGICAL
+;  name of the target drive for all subsequent disk operations.
+;
+;  For example, assume the CP/M logical drive A: is the left
+;  floppy disk drive, and the CP/M logical drive F: is the first
+;  hard disk partition.  If on entry to the SWAP routine the B
+;  register contained 0 (logical drive A:) and the C register
+;  contained 5 (logical drive F:), after SWAP, all accesses to
+;  CP/M drive A: will be to the first hard disk partition, while
+;  all accesses to CP/M drive F: would be to the left floppy 
+;  drive.
+;
+;  		* * * * *   WARNING   * * * * * 
+;
+;  To maintain compatibility with all utilities, and also for
+;  some special case coding within this BIOS, the user definable
+;  E-DISK must remain as Drive E logical.
+;
+;	*	*	*	*	*	*	*	*
+SWAP:
+	LD	A,B		; Get first drive logical #
+	CALL	PAGET		; Compute current address in table
+	PUSH	HL		; Save this address
+	LD	A,C		; Get second drive logical #
+	CALL	PAGET		; Compute current address in table
+	POP	DE		; Get pointer to first back in D
+	LD	B,4		; Set up to move 4 bytes
+PATMV:
+	LD	C,(HL)		; Get a byte from the first str
+	LD	A,(DE)		; Get a byte from the second str
+	LD	(HL),A		; Swap the bytes
+	LD	A,C		; .
+	LD	(DE),A		; .
+	INC	DE		; Bump pointers
+	INC	HL		; .
+	DJNZ	PATMV
+	RET			; No -- all done
+
+;	*	*	*	*	*	*	*	*
+;
+;  HD$INFO	Return HD information.
+;
+;  Returns a pointer to various HD pointers.
+;
+;	*	*	*	*	*	*	*	*
+HD$INFO:
+	LD	HL,HD$ALV$AVAIL	; Get pointer to available area
+	RET			; Provide addr if ptr zero
+
+HD$ALV$AVAIL:
+	DEFW	HD$CURRENT	; Current BIOS buffer area value
+	DEFW	HD$VECTORS	; Hard disk allocation vector base
+	DEFW	HD$BYTE$BLOCK	; Location of SCSI byte/block flag
+	DEFW	0		; Reserved
+	DEFW	0		; Reserved
+	DEFW	0		; Reserved
+
+;	*	*	*	*	*	*	*	*
+;
+;  PHTBAC	PHYSICAL TABLE ACCESS
+;
+;  On entry, if the HL register pair is 0000H, the address of the
+;  Logical vs Physical table is returned in HL, with the length 
+;  of that table in the A register.
+;
+;  If on entry, the HL register pair is non-zero, the current
+;  table is replaced with the user data starting at the location
+;  pointed to by HL for the length of the table.
+;
+;  Note:  When updating the table, ALL bytes are re-written. No
+;  length parameter is accepted from the user, and no alternate
+;  starting address is recognized.
+;
+;  Refer to the PHYTAB for byte definitions...
+;
+;	*	*	*	*	*	*	*	*
+PHTBAC:
+	EX	DE,HL		; Save ptr in case we need it
+	LD	A,D		; Test former HL
+	OR	E		; 
+	LD	A,PHYEND-PHYTAB	; Get length of table
+	LD	HL,PHYTAB	; .  and address, too.
+	JR	NZ,CPY$TBL	; Copy new table if ptr non-zero
+	RET			; Provide addr if ptr zero
+
+;	*	*	*	*	*	*	*	*
+;
+;  PAGET	GET DRIVE LOGICAL INFORMATION
+;
+;  Entry here from within the BIOS, as well as from the NXTTBL
+;  BIOS Jump entry.
+;
+;  Enter with the Drive Logical address in the A reg.
+;
+;  Exits with the Logical Table entry address in the HL reg pair.
+;
+;  NOTE: Destroys DE and A
+;
+;	*	*	*	*	*	*	*	*
+PAGET:
+	LD	HL,PHYTAB	; Get base of physical table
+	ADD	A,A		; Compute offset to the descriptor
+	ADD	A,A		; .
+	LD	E,A		; .
+	LD	D,0		; .
+	ADD	HL,DE		; .
+	RET			; Return with ptr in HL
+
+CPY$TBL:			; Copy from DE to HL, length A
+	EX	DE,HL		; .  (exchange DE and HL)
+	LD	C,A		; .  (put length info in BC)
+	LD	B,0		; .  (now it's a-ok for LDIR)
+	LDIR			; .  (use LDIR to move table)
+	RET			; and return to caller
+
+;	*	*	*	*	*	*	*	*
+;
+;  PHYSICAL DRIVER TABLE
+;
+;  This table contains information to identify the Logical vs
+;  Physical drives requested, and also the disk driver required 
+;  for the particular drive.
+;
+;  The table is built as 16 groups of 4-bytes each, arranged in
+;  the logical order of drives A thru G for a total of 28 bytes.
+;
+;  The four bytes defining each Logical drive are as follows:
+;
+;  +0	Disk Driver ID number, 0=reserved for error, Max=7
+;
+;  +1	Physical offset from DPBASE in DPH table, and the drive
+;	unit number.
+;
+;	Bits   7654:	Offset to DPBASE 0 - F
+;
+;	Bits   3210:	Physical device address to be passed
+;			to the respective driver.
+;
+;			For floppies, this is the drive unit #.
+;			For hard disks, these are reserved.
+;
+;  +2	Type identifier for this drive 
+;
+;	Floppy usage:
+;
+;		   Bit: 76543210
+;	Density		x	   0=single     1=double
+;	Sides		 x	   0=single     1=double
+;	Sector #'s	  x	   0=same       1=continuous
+;	Track count	   x	   0=down       1=down front, up back
+;	Alloc unit	    xx	   00=1K   01=2K   10=4K   11=8K
+;	Sector size	      xx   00=128  01=256  10=512  11=1024
+;		   Bit: 76543210
+;
+;	Hard disk usage:
+;
+;		   Bit: 76543210
+;	LUN		xxx	   Logical unit number (0-7)
+;	Reserved	   x	   
+;	Alloc unit	    xx	   00=1K   01=2K   10=4K   11=8K
+;	Sector size	      xx   00=128  01=256  10=512  11=1024
+;		   Bit: 76543210
+;
+;	Note:	Allocation unit and sector size usage are the same
+;		for floppy and hard disk.
+;
+;
+;  +3	00 for floppy or SCSI bus address for hard disk.
+;
+;	For normal SCSI operations, only one bit may be set.
+;
+;		   Bit: 76543210
+;	SCSI address 0	       x	This is the actual
+;	SCSI address 1	      x		bit pattern supplied
+;	SCSI address 2	     x		during the SCSI
+;	SCSI address 3	    x		select routine.  No
+;	SCSI address 4	   x		internal address
+;	SCSI address 5	  x		translation or bit
+;	SCSI address 6	 x		scaling is done.
+;	SCSI address 7	x		
+;
+;  +4	Duplicated for drives B thru P
+; thru
+; +63
+;
+;  Disk Driver Linkage  +64 thru +79
+;
+;  Each disk driver is described by 2 bytes which point to the
+;  driver to be used, with driver 0 reserved for the SELECT ERROR
+;  trap for unused or deselected drive letters.
+;
+;	*	*	*	*	*	*	*	*
+PHYTAB:
+	DEFB	1,000H, SSDD48, 0H	; Floppy drive A
+	DEFB	1,011H, SSDD48, 0H	; Floppy drive B
+	DEFB	1,022H, SSDD48, 0H	; Floppy drive C
+	DEFB	1,033H, SSDD48, 0H	; Floppy drive D
+
+	DEFB	2,044H, 0H, 0FFH ; Special floppy drive E
+
+	DEFB	0,050H,0,0		; Hard disk drive F
+	DEFB	0,060H,0,0		; Hard disk drive G
+	DEFB	0,070H,0,0		; Hard disk drive H
+	DEFB	0,080H,0,0 		; Hard disk drive I
+
+	DEFB	0,090H,0,0		; Hard disk drive J
+	DEFB	0,0A0H,0,0		; Hard disk drive K
+	DEFB	0,0B0H,0,0		; Hard disk drive L
+	DEFB	0,0C0H,0,0		; Hard disk drive M
+
+	DEFB	0,0D0H,0,0		; Hard disk drive N
+	DEFB	0,0E0H,0,0		; Hard disk drive O
+	DEFB	0,0F0H,0,0		; Hard disk drive P
+
+DRVRADR:			; Driver table
+	DEFW	SELERR		; Driver 0 - select error
+	DEFW	FLOPPY		; Driver 1 - floppy
+	DEFW	DISKE		; Driver 2 - E-disk
+	DEFW	DRVR3		; Driver 3 - SCSI hard disk
+	DEFW	SELERR		; Driver 4 - not defined
+	DEFW	SELERR		; Driver 5 - not defined
+	DEFW	SELERR		; Driver 6 - not defined
+	DEFW	SELERR		; Driver 7 - not defined
+
+PHYEND	EQU	$
+;	*	*	*	*	*	*	*	*
+;
+;  HOME		Home the selected disk
+;
+;  Entry via the bios jump table HOME
+;
+;	*	*	*	*	*	*	*	*
+HOME:
+	LD	BC,0		; Set the current track to zero
+	CALL	SETTRK		; .
+	LD	A,(HSTWRT)	; Check for pending write
+	OR	A		; .
+	JR	NZ,HOMED	; Pending write, leave active alone
+	LD	(HSTACT),A	; No writes, clear host active
+HOMED:
+	RET
+
+;	*	*	*	*	*	*	*	*
+;
+;  SETTRK	Set track (BIOS JMP table entry)
+;
+;	*	*	*	*	*	*	*	*
+SETTRK:				; Set track given by BC
+	LD	(SEKTRK),BC
+	LD	(CPMTRK),BC
+	RET
+
+;	*	*	*	*	*	*	*	*
+;
+;  SETSEC	Set sector (BIOS JMP table entry)
+;
+;	*	*	*	*	*	*	*	*
+SETSEC:				; Set sector given by reg C
+	LD	A,C
+	LD	(SEKSEC),A
+	LD	(CPMSEC),A
+	RET
+
+;	*	*	*	*	*	*	*	*
+;
+;  SETDMA	Set DMA (BIOS JMP table entry)
+;
+;	*	*	*	*	*	*	*	*
+SETDMA:				; Set DMA address given by BC
+	LD	(DMAADR),BC
+	XOR	A		; clear flags for ZRDOS
+	RET
+
+;	*	*	*	*	*	*	*	*
+;
+;  SECTRAN	Sector translation (BIOS JMP table entry)
+;
+;  NOTE: No sector translation is done for the AMPRO disk formats.
+;
+;	*	*	*	*	*	*	*	*
+SECTRAN:			; Translate sector number in BC
+	LD	H,B
+	LD	L,C
+	RET
+
+;	*	*	*	*	*	*	*	*
+;
+;  SELECT	Select disk routine
+;
+;  Entry via the BIOS Jump Table SELDSK
+;
+;  Entry:
+;	C  CP/M Logical drive
+;	E  Bit zero is non-zero if this is the first select of the
+;	   drive since warm or cold boot.
+;
+;	*	*	*	*	*	*	*	*
+SELDSK:
+	LD	A,C		; Get logical disk requested
+	LD	(LOGDSK),A	; Save it
+	LD	(SEKDSK),A	; .
+
+	LD	A,(MAX$DRV$LTR)	; .  Is the letter requested
+	CP	C		; .  greater than the max letter?
+	JP	C,SELERR	; .  Yes -- return w/select error
+
+	LD	(OLDSTK),SP	; save old stack
+	LD	SP,LOCSTK	; set local stack
+	LD	A,0FFH		; No to either -- set SELECT cmd
+
+; NOTE:  we fall through to PDRVR
+;	*	*	*	*	*	*	*	*
+;
+;  PDRVR	Physical driver linkage
+;
+;  Enter with the Logical Disk Drive saved at (LOGDSK) and the 
+;  Physical Command in the A reg as:
+;
+;	FF	Select Disk Routine
+;	00	Write Disk
+;	01 	Read  Disk
+;
+;  The proper driver is computed and jumped to as needed.
+;
+;	*	*	*	*	*	*	*	*
+PDRVR:
+	PUSH	DE		; Protect first select status
+	LD	(PHYCMD),A	; Save cmd for later
+	LD	A,(LOGDSK)	; Get logical drive requested
+	CALL	PAGET		; Get table address for this drive
+	LD	(PHYTAG),HL	; Save index to logical descriptor
+	PUSH	HL		; Save start address
+	LD	DE,TAGDRV	; Move the four tag bytes
+	LD	BC,4		; .
+	LDIR			; (LDIR)
+	POP	HL		; Restore starting address
+	POP	DE		; Restore first select status
+	LD	A,(HL)		; Get driver number
+	OR	A		; .  If zero, then select error
+	JR	Z,SELERR	; .
+	LD	B,A		; save drive index
+	INC	HL		; Bump to next position
+	LD	A,(HL)		; Get unit # and DPH offset
+	AND	0FH		; Mask all but unit #
+	LD	(PHYDRV),A	; Save unit #
+	LD	A,(HL)		; Get unit # and DPH offset again
+	AND	0F0H		; Mask all but DPH offset
+	LD	(DPHDRV),A	; Save DPH offset
+PDRVR1:	
+	LD	A,B		; get driver number back
+	ADD	A,A		; .
+	LD	C,A		; Compute ptr within driver table
+	LD	B,0		; .
+	LD	HL,DRVRADR	; .
+	ADD	HL,BC		; .
+	LD	A,(HL)		; Get ptr to driver in HL
+	INC	HL		; .
+	LD	H,(HL)		; .
+	LD	L,A		; .
+	LD	A,(PHYCMD)	; Get cmd back in the A reg
+	JP	(HL)		; Jump to the proper driver
+
+;	*	*	*	*	*	*	*	*
+;
+;  SELERR	Indicate select error to the BDOS
+;
+;	*	*	*	*	*	*	*	*
+SELERR:
+	LD	HL,0		; Zero indicates select failed
+	RET
+
+;	*	*	*	*	*	*	*	*
+;
+;  FLOPPY	Floppy disk dispatcher -- driver code (01)
+;
+;  Enter with operation code in the A register as:
+;
+;	FF	Select Disk
+;	00	Write Disk
+;	01	Read Disk
+;
+;	*	*	*	*	*	*	*	*
+FLOPPY:
+	INC	A		; Code = select?
+	JP	Z,SELFLP	; Yes, perform a floppy select
+	JP	FLOPPYIO	; No,  perform host read or write
+
+;	*	*	*	*	*	*	*	*
+;
+;  DISKE	E-disk dispatcher -- driver code (02)
+;
+;  Enter with the operation code in the A register as:
+;
+;	FF	Select Disk
+;	00	Write Disk
+;	01	Read Disk
+;
+;	*	*	*	*	*	*	*	*
+DISKE:
+	PUSH	AF		; Save command
+	PUSH	DE		; .  and first-select status
+	LD	A,(EDSD)	; Get E-disk unit
+	LD	E,A		; Get type byte for the drive
+	LD	D,0		; .  we want to be the 'E'
+	LD	HL,DRIVE$TYPES	; .  disk
+	ADD	HL,DE		; .
+	LD	A,(HL)		; .
+	AND	00FH		; Strip all but select bit
+	LD	B,A		; Save select bit
+	LD	HL,DRIVE$TYPES+4 ; Point to the E-disk drive byte
+	LD	A,(HL)		; Get the E-disk drive byte
+	AND	0F0H		; Strip select bits
+	OR	B		; OR in proper select bits
+	LD	(HL),A		; Save new E-disk drive byte
+	PUSH	HL		; Save pointer to E-disk drive byte
+	LD	A,(EPARM-1)	; Get type byte
+	LD	HL,(PHYTAG)	; Save as PHYTAB type byte
+	INC	HL		; .
+	INC	HL		; .
+	LD	(HL),A		; .
+	LD	(TAGTYP),A	; and as current type byte
+	POP	HL		; Get E-disk drive byte ptr back
+	RES	5,(HL)		; Indicate double density
+	RLCA			; See if E-disk is single density
+	JR	C,E$IS$DD	; No,  leave bit alone
+	SET	5,(HL)		; Yes, indicate single density
+E$IS$DD:
+	POP	DE		; Recover first select status
+	POP	AF		; .  and command
+	INC	A		; Select?
+	JP	Z,SELEDSK	; Yes, perform select
+	JP	FLOPPYIO	; Otherwise use R/W floppy host
+
+PUTS:				; Send zero-terminated str to con:
+	LD	A,(HL)		; Get char
+	INC	HL		; Bump pointer
+	OR	A		; Zero is end-of-string
+	RET	Z		; Yes -- return
+	LD	C,A		; Otherwise move to C register
+	CALL	CONOUT1		; .  and send to console
+	JP	PUTS		; Repeat for remaining bytes
+
+;	*	*	*	*	*	*	*	*
+;
+;  WBOOT	Warm boot system
+;
+;  This routine reloads the CCP and BDOS from the current logical
+;  disk defined as SYSDSK.  While SYSDSK is normally logical drive
+;  A:, any other drive may be referenced by setting SYSDSK to the
+;  desired logical drive address (0-15).
+;
+;  The warm boot consists of reading 1600 hex bytes of code, from
+;  CP/M track 0, sector 1, for 44 CP/M records.  The code is loaded
+;  starting with the CCP address, which is defined at the start of
+;  this BIOS listing.
+;
+;  The disk currently assigned to SYSDSK must have a standard AMPRO
+;  system image residing on the boot tracks (tracks 0 and 1).
+;
+;  If SYSDSK is not logical drive A:, the BDOS will still access the
+;  current logical drive A: after the GOCPM entry in order to build
+;  the directory allocation vector table for drive A: prior to the
+;  selection of the current disk.
+; 	
+;	*	*	*	*	*	*	*	*
+WBOOT:
+	LD	SP,80H		; Set stack to below default DMA
+	LD	A,(SYSDSK)	; Get current system disk
+	LD	C,A		; .
+	LD	E,0		; Set autoselect bit
+	CALL	SELDSK		; Select the system disk
+	LD	A,H		; Check for a select error
+	OR	L		; .
+	JR	Z,WBERR		; Select error -- try again
+
+	LD	BC,0		; Start reading from track 0
+	CALL	SETTRK		; .
+	LD	B,NSECTS	; Set the # of sectors to read
+	LD	C,1		; Start from sector 1 of track 0
+	LD	HL,CCP		; Where we want the data to go
+WBLOOP:
+	PUSH	BC		; Save sector count
+	PUSH	HL		; and DMA address
+	CALL	SETSEC		; Set the sector to read next
+	POP	BC		; Get the DMA address
+	PUSH	BC		; Save it back
+	CALL	SETDMA		; Set the current DMA
+	CALL	READ		; Read the sector
+	OR	A		; Check for errors
+	JR	NZ,WBERR	; Disp msg & try again on error
+
+	POP	HL		; Get DMA address
+	POP	BC		; Get count & current sector
+	LD	DE,128		; Update DMA address
+	ADD	HL,DE		; .
+	INC	C		; Bump sector count
+	LD	A,(CPMSPT)	; Get sectors/track for this disk
+	CP	C		; Are we at the end of track yet?
+	JR	NZ,NXTSEC	; No,  just get the next sector
+	PUSH	BC		; Yes, save count & current sector
+	LD	BC,(CPMTRK)	; Bump current track
+	INC	BC		; .
+	CALL	SETTRK		; .
+	POP	BC		; Restore count
+	LD	C,0		; Reset sector to 0
+NXTSEC:
+	DJNZ	WBLOOP
+
+; NOTE: WBOOT falls through to GOCPM
+;	*	*	*	*	*	*	*	*
+;
+;  GOCPM	Setup CP/M vectors and jump to CP/M
+;
+;	*	*	*	*	*	*	*	*
+GOCPM:
+	LD	SP,80H		; set stack pointer
+	XOR	A
+	LD	(HSTACT),A	; Clear the host active flag
+	LD	(HSTWRT),A	; Clear the host written flag
+	LD	(UNACNT),A	; clear unacnt value
+
+	LD	A,0C3H		; Setup the warm boot vector
+	LD	(0),A		; .
+	LD	HL,WBOOTE	; .
+	LD	(1),HL		; .
+	LD	(5),A		; and the BDOS vector
+	LD	HL,BDOS		; .
+	LD	(6),HL		; .
+	LD	BC,80H		; Setup the default DMA
+	CALL	SETDMA		; .
+	EI			; Enable interrupts
+	LD	A,(CDISK)	; Get current disk/user
+	LD	C,A		; .
+	JP	CCP		; And go to CP/M ...
+
+;	*	*	*	*	*	*	*	*
+;
+;  WBERR	Display error msg on warm boot error and try again.
+;
+;	*	*	*	*	*	*	*	*
+WBERR:
+	LD	HL,BOOTMSG	; Warm boot error -- display
+	CALL	PUTS		; .  boot failed message and
+	JP	WBOOT		; .  try again ...
+BOOTMSG:
+	DEFB	CR,LF,'BOOT FAILED!',0
+
+
+
+;	*	*	*	*	*	*	*	*
+;
+;  SELFLP	Floppy disk select routine
+;
+;  See if the disk has been accessed since the last warm or cold
+;  boot (bit 0 of the E register is non-zero).  If true, seek to
+;  track 2 and read the ID to determine if the disk is SS or DS,
+;  48tpi or 96tpi, and in a 48tpi or 96tpi drive.  Set up the disk
+;  access tables as appropriate.
+;
+;	*	*	*	*	*	*	*	*
+SELFLP:
+	BIT	0,E		; Check for new mount since boot
+	JP	NZ,SELEND	; Not new, no need to determine type
+	CALL	MAPTYPE		; Clear double step bit
+	RES	6,(HL)		; .
+	CALL	GETTYPE		; Set type byte to SS48tpi
+	LD	(HL),SSDD48	; .
+	CALL	SETUP		; Setup parameters for SSDD
+	CALL	RESTORE		; Restore floppy to track 00
+	JP	NZ,SELERR	; Error on restore, give select err
+	LD	A,2		; Seek to track 2
+	LD	(CPMTRK),A	; .
+	CALL	SEEK		; .
+	LD	A,(IDSAVE+3)	; Get sector size (bytes/sector)
+	BIT	1,A		; Bit 1 non-zero means 512 or 1024
+	JP	Z,SELERR	; 128, 256 = err for AMPRO fmt
+	AND	01H		; Reset all but bit 0
+	ADD	A,A		; *2 ... now 0=48tpi, 2=96tpi
+	LD	C,A		; Save in C reg for the moment
+	LD	A,(IDSAVE+2)	; Get sector #
+	CP	DSBIAS+1	; Compare to DS bias (16+1)
+	JR	C,SELSS
+	INC	C		; Bump pointer if DS
+SELSS:	LD	B,0		; BC now contains offset to type
+	CALL	GETTYPE		; Get ptr to type byte
+	EX	DE,HL		; Save ptr in DE
+	LD	HL,TYPTBL	; Get type table base
+	ADD	HL,BC		; Add offset
+	LD	A,(HL)		; Get actual type byte
+	LD	(DE),A		; Save in PHYTAB
+
+	CALL	GETDPT		; Get ptr to DPT
+	LD	DE,10		; Bump by 10 to get ptr to DPB
+	ADD	HL,DE		; .
+	EX	DE,HL		; Save ptr in DE
+	LD	HL,DPBTBL	; Get DPB ptr base
+	ADD	HL,BC		; Add offset
+	ADD	HL,BC		; Add offset again (word ptr)
+	LD	A,(HL)		; Get first byte of DPB ptr
+	LD	(DE),A		; Save it
+	INC	DE		; Bump pointers
+	INC	HL		; .
+	LD	A,(HL)		; Get second byte of DPB ptr
+	LD	(DE),A		; Save it
+
+	LD	A,(IDSAVE)	; Get track number
+	DEC	A		; Track=1 means set double step
+	JR	Z,SET$DSTEP
+	DEC	A		; Track=2 means normal step
+	JR	Z,SELEND
+	JP	SELERR		; Any other value = select err
+
+SET$DSTEP:
+	CALL	MAPTYPE		; Map byte for this drive,
+	SET	6,(HL)		; set the double step bit.
+
+; NOTE: We fall through to SELEND ...
+;	*	*	*	*	*	*	*	*
+;
+;  SELEND	Compute proper deblocker variables and DPT addr
+;
+;  Driver types 1, 2, and 3 all re-enter here.
+;
+;	*	*	*	*	*	*	*	*
+SELEND:
+	CALL	GETTYPE		; Get current type byte
+	LD	B,A		; Save for a moment
+	AND	3		; Mask all but sector shift bits
+	LD	(SECSHF),A	; Save sector shift value
+	LD	E,A		; Get sector shift byte from table
+	LD	D,0		; .
+	LD	HL,SEC$MSK$TBL	; .
+	ADD	HL,DE		; .
+	LD	A,(HL)		; .
+	LD	(SECMSK),A	; Save it
+
+	LD	A,B		; Get type byte back
+	RRA			; Shift over to move alloc size
+	RRA			; .  to the proper position
+	AND	3		; Mask all but alloc bits
+	LD	E,A		; Get initial unalloc from table
+;	MVI	D,0		; . already zero from start of routine
+	LD	HL,M$UNACT$TBL	; .
+	ADD	HL,DE		; .
+	LD	A,(HL)		; .
+	LD	(MUNACT),A	; Save it
+
+; NOTE: We fall through to GETDPT . . .
+;	*	*	*	*	*	*	*	*
+;
+;  GETDPT	Calculate the DPH address for the current logical disk
+;
+;  Entry with the DPH vector in DPHDRV, exits with the DPH address in
+;  the HL register pair, and the current DPB saved at CURDPB (primarily
+;  for the warm boot routine).
+;
+;	*	*	*	*	*	*	*	*
+GETDPT:
+	LD	A,(DPHDRV)	; Get DPH pointer
+	LD	E,A		; .
+	LD	D,0		; . ****
+	LD	HL,DPBASE	; .
+	ADD	HL,DE		; .
+	EX	DE,HL		; save it (need to return it in 'hl')
+	LD	L,10		; add offset to dpb 'h'=zero from ****
+	ADD	HL,DE		; .
+	LD	A,(HL)		; Copy DPB ptr to HL
+	INC	HL		; .
+	LD	H,(HL)		; .
+	LD	L,A		; .
+	LD	(CURDPB),HL	; Save current DPB pointer
+	LD	A,(HL)		; Get sectors-per-track
+	LD	(CPMSPT),A	; Save it
+	EX	DE,HL		; get dph pointer
+	RET			; Leave with DPH pointer in HL
+
+TYPTBL:				; Drive type bytes
+	DEFB	SSDD48
+	DEFB	DSDD48
+	DEFB	SSDD96
+	DEFB	DSDD96
+
+DPBTBL:				; DBP pointers
+	DEFW	SPARM
+	DEFW	DPARM
+	DEFW	DPARM
+	DEFW	QPARM
+
+SEC$MSK$TBL:
+				; Sector mask table
+	DEFB	00H
+	DEFB	01H
+	DEFB	03H
+	DEFB	07H
+
+M$UNACT$TBL:
+				; Initial unalloc count table
+	DEFB	8
+	DEFB	16
+	DEFB	32
+	DEFB	64
+
+;	*	*	*	*	*	*	*	*
+;
+;	SELECT THE E-DISK DRIVE
+;
+;	Builds the appropriate tables, and attempts to re-zero the
+;	drive. Returns with Select Error if can't re-zero.
+;
+;	*	*	*	*	*	*	*	*
+SELEDSK:
+	BIT	0,E		; Check for new mount since boot
+	JP	NZ,SELEND	; Not new, no need to determine type
+	CALL	GETTYPE		; Get type byte & pointer
+	BIT	5,A		; Continuous sector numbers?
+	JR	Z,NOTCONT	; No,  don't bother computing E-adj
+	AND	03H		; Yes, compute E-adj from sector
+	LD	BC,(EPARM-1)	; .  size and sectors per track
+	LD	C,0FFH		; .  (A=count,B=SPT,C=mask)
+SELESHIFT:
+				; .
+	OR	A		; .  Test if done & clear carry
+	JR	Z,SDONE		; .  Yes, save parameter
+	RR	C		; .  (Rotate C right)
+	RR	B		; .  (Rotate B right)
+	DEC	A		; .  Decrement count
+	JP	SELESHIFT	; .  Next shift ...
+NOTCONT:
+	LD	BC,0		; Not continuous, set adj to zero
+SDONE:
+	LD	A,B		; Shifts done, get computed E-adj
+	AND	C		; Mask extra bits off
+	LD	(ESECADJ),A	; Save as proper adj
+	CALL	SETUP		; Setup parameters for the E-disk
+	CALL	RESTORE		; Restore floppy to track 00
+	INC	A		; Check for error during restore
+	JP	Z,SELERR	; Error code, return with select err
+	JP	SELEND		; No error, finish the select
+
+;---------------------------------------------------------------
+;
+;	READ CP/M SECTOR FROM THE CURRENTLY SELECTED DISK
+;
+;	ENTRY VIA THE BIOS JUMP TABLE
+;
+;--------------------------------------------------------------
+READ:
+	LD	(OLDSTK),SP	; save old stack
+	LD	SP,LOCSTK	; set local stack
+	LD	A,(SECSHF)	; secshf = 0 if 128 byte sector size
+	AND	A
+	JP	Z,READHST	; IF 128 BYTES
+	XOR	A
+	LD	(UNACNT),A
+	INC	A		; 'a' = 1
+	LD	(READOP),A	; READ OPERATION
+	LD	(RSFLAG),A	; MUST READ DATA
+	LD	A,WRUAL
+	LD	(WRTYPE),A	; TREAT AS UNALLOC
+	JP	RWOPER		; TO PERFORM THE READ
+
+;---------------------------------------------------------------
+;
+;	WRITE CP/M SECTOR FROM THE CURRENTLY SELECTED DISK
+;
+;	ENTRY VIA THE BIOS JUMP TABLE
+;
+;--------------------------------------------------------------
+WRITE:
+	LD	(OLDSTK),SP	; save callers stack
+	LD	SP,LOCSTK	; set local stack
+	LD	A,(SECSHF)	; secshf = 0 if 128 bytes
+	AND	A
+	JP	Z,WRITEHST	; IF 128 BYTES
+	XOR	A		; 0 TO ACCUMULATOR
+	LD	(READOP),A	; NOT A READ OPERATION
+	LD	A,C		; WRITE TYPE IN C
+	LD	(WRTYPE),A
+	CP	WRUAL		; WRITE UNALLOCATED?
+	JP	NZ,CHKUNA
+
+;	WRITE TO UNALLOCATED, SET PARAMETERS
+;	FOR EDSK, WE NEED TO CHECK TO SEE IF SEKDSK IS THE E DISK.
+;	IF SO, THEN UNACNT WILL BE SET ACCORDING TO THE DISK TYPE.
+;	FOR AMPRO DISKS, ITS ALWAYS BLKSIZ/128.
+
+	LD	HL,MUNACT
+	LD	DE,UNACNT
+	LD	BC,5
+	LDIR
+
+CHKUNA:
+;	CHECK FOR WRITE TO UNALLOCATED SECTOR
+;	MORE UNALLOCATED RECORDS REMAIN
+;	DISKS ARE THE SAME
+;	TRACKS ARE THE SAME
+
+	XOR	A		; clear 'a'
+	LD	HL,UNACNT
+	OR	(HL)		; see if any more remain
+	JR	Z,ALLOC		; no more remain
+	DEC	(HL)		; unacnt -1
+	INC	HL		; 'hl' = unadsk
+
+; get ready for block match
+; sekdsk=unadsk, sektrk=unatrk, seksec=unasec ?
+
+	LD	DE,SEKDSK	; 
+	LD	BC,4
+MORUNA:	LD	A,(DE)
+	CPI
+	JR	NZ,ALLOC	; no match
+	INC	DE		; next byte
+	JP	PE,MORUNA	; count not over
+
+	DEC	HL		; correct 'hl' to unasec
+
+; MATCH, MOVE TO NEXT SECTOR FOR FUTURE REF
+
+	INC	(HL)		; UNASEC = UNASEC+1
+	LD	A,(HL)		; END OF TRACK?
+	EX	DE,HL		; save 'hl' for overflow
+	LD	HL,(CURDPB)	; get current DPB as set by select
+EMATCH:	CP	(HL)		; see if end of track
+	JP	C,NOOVF		; SKIP IF NO OVERFLOW
+
+; OVERFLOW TO NEXT TRACK
+
+	XOR	A
+	LD	(DE),A		; unasec 'de' = 0
+	LD	HL,(UNATRK)
+	INC	HL
+	LD	(UNATRK),HL
+
+; MATCH FOUND, MARK AS UNNECESSARY READ
+
+NOOVF:	XOR	A		; 0 TO ACCUMULATOR
+	LD	(RSFLAG),A	; RSFLAG = 0
+	JP	RWOPER+1	; TO PERFORM THE WRITE
+
+; NOT AN UNALLOCATED RECORD, REQUIRES PRE-READ
+
+ALLOC:	XOR	A		; 0 TO ACCUM
+	LD	(UNACNT),A	; UNACNT = 0
+	INC	A		; 1 TO ACCUM
+	LD	(RSFLAG),A	; RSFLAG = 1
+
+; ENTER HERE TO PERFORM THE READ/WRITE
+
+RWOPER:	XOR	A		; ZERO TO ACCUM
+	LD	(ERFLAG),A	; NO ERRORS (YET)
+	LD	A,(SECSHF)
+	LD	B,A
+	LD	A,(SEKSEC)	; COMPUTE HOST SECTOR
+
+SLOOP:
+	SRL	A		; shift 'a' right, msb = 0
+	DJNZ	SLOOP
+	LD	(SEKHST),A	; HOST SECTOR TO SEEK
+
+;				ACTIVE HOST SECTOR?
+	LD	HL,HSTACT	; HOST ACTIVE FLAG
+	LD	A,(HL)
+	LD	(HL),1		; ALWAYS BECOMES 1
+	OR	A		; WAS IT ALREADY?
+	JR	Z,FILHST
+
+;				HOST BUFFER ACTIVE, SAME AS SEEK BUFFER?
+	LD	DE,SEKDSK
+	LD	HL,HSTDSK
+	LD	BC,3
+MATMOR:	LD	A,(DE)		; sekdsk=hstdsk, sektrk=hsttrk ?
+	CPI
+	JR	NZ,NOMATCH
+	INC	DE
+	JP	PE,MATMOR
+	LD	A,(SEKHST)	; sekhst=hstsec ?
+	CP	(HL)
+	JR	Z,MATCH		; match
+
+NOMATCH:
+;				PROPER DISK, BUT NOT CORRECT SECTOR
+	LD	A,(HSTWRT)	; HOST WRITTEN?
+	OR	A
+	LD	A,(HSTDSK)	; SELECT HOST AS DISK TO WORK ON
+	LD	(LOGDSK),A	; SET LOGICAL DRIVE = BUFFERS DRIVE
+	LD	HL,(HSTTRK)
+	LD	(CPMTRK),HL
+	CALL	NZ,WRITEHST	; CLEAR HOST BUFF
+
+FILHST:	LD	A,(SEKDSK)	; May have to fill host buffer
+	LD	(HSTDSK),A
+	LD	(LOGDSK),A	; UPDATE LOGICAL DRIVE 
+	LD	HL,(SEKTRK)
+	LD	(HSTTRK),HL
+	LD	(CPMTRK),HL
+	LD	A,(SEKHST)
+	LD	(HSTSEC),A
+	LD	A,(RSFLAG)	; NEED TO READ?
+	OR	A
+	CALL	NZ,READHST	; YES, IF 1
+	XOR	A		; 0 TO ACCUM
+	LD	(HSTWRT),A	; NO PENDING WRITE
+
+;
+;	COPY DATA TO OR FROM BUFFER
+;	EDSK: SECTOR MASK (SECMSK) MUST BE A VARIABLE FOR EDISK AND
+;	IS CALCULATED BY (HSTSIZ/128)-1. THIS IS THREE FOR AMPRO,
+;	KAYPRO, AND OTHER 512-BYTE SECTORS, AND 1 FOR 256 BYTE SECTORS.
+;
+MATCH:	LD	A,(SEKSEC)	; MASK BUFFER NUMBER
+	LD	HL,SECMSK
+	AND	(HL)		; LEAST SIGNIF BITS
+	ADD	A,A		; x2
+	LD	L,A		; Get offset from table
+	LD	H,0
+	LD	DE,BUFTBL	; Buffer table
+	ADD	HL,DE		; 'hl' points to offset address
+	LD	A,(HL)
+	INC	HL
+	LD	H,(HL)
+	LD	L,A		; 'hl' has hostbuffer address
+	LD	DE,(DMAADR)	; load 'de' dmaadress
+	LD	BC,128		; set 'bc' up form 128 byte transfer
+	LD	A,(READOP)	; WHICH WAY?
+	OR	A
+	JR	NZ,RWMOVE
+
+;				WRITE OPERATION, MARK AND SWITCH DIRECTION
+	LD	A,1
+	LD	(HSTWRT),A	; HSTWRT = 1
+	EX	DE,HL		; SOURCE/DEST SWAP
+
+RWMOVE:	LDIR		; 'hl' = source, 'de' = destination
+
+;	DATA HAS BEEN MOVED TO/FROM HOST BUFFER
+
+	LD	A,(WRTYPE)	; WRITE TYPE
+	CP	WRDIR		; TO DIRECTORY?
+	LD	A,(ERFLAG)	; IN CASE OF ERRORS
+	RET	NZ		; NO FURTHER PROCESSING
+
+;	CLEAR HOST BUFFER FOR DIRECTORY WRITE
+
+	OR	A		; ERRORS?
+	RET	NZ		; SKIP IF SO
+	XOR	A		; 0 TO ACCUM
+	LD	(HSTWRT),A	; BUFFER WRITTEN
+	LD	A,(HSTDSK)
+	LD	(LOGDSK),A
+	LD	HL,(HSTTRK)
+	LD	(CPMTRK),HL
+	CALL	WRITEHST
+	LD	A,(ERFLAG)
+	RET
+
+WRITEHST:
+				; LOGDSK = HOST DISK #, CPMTRK = HOST TRACK #,
+				; HSTSEC = HOST SECT #. WRITE "HSTSIZ" BYTES
+				; FROM HSTBUF AND RETURN ERROR FLAG IN ERFLAG.
+				; RETURN ERFLAG NON-ZERO IF ERROR
+
+	XOR	A
+	JP	HOSTDO
+
+READHST:
+				; LOGDSK = HOST DISK #, CPMTRK = HOST TRACK #,
+				; HSTSEC = HOST SECT #. READ "HSTSIZ" BYTES
+				; INTO HSTBUF AND RETURN ERROR FLAG IN ERFLAG.
+
+	LD	A,1
+HOSTDO:	LD	(RWHOST),A
+HOSTIO:	JP	PDRVR		; SELECT NEXT ROUTINE VIA PDRVR
+;
+; Buffer table, determine start address of host buffer for read/write
+;
+BUFTBL:	DEFW	HSTBUF+0000
+	DEFW	HSTBUF+0128
+	DEFW	HSTBUF+0256
+	DEFW	HSTBUF+0384
+	DEFW	HSTBUF+0512
+	DEFW	HSTBUF+0640
+	DEFW	HSTBUF+0768
+	DEFW	HSTBUF+0896
+;
+;--------------------------------------------------------------------
+;
+;	FLOPPY DISK READ/WRITE HOST ROUTINES
+;
+;-------------------------------------------------------------------
+FLOPPYIO:
+	CALL	SETUP		; OUTPUT TO DRIVE SELECT REGISTER
+	LD	A,FRETRY
+	LD	(TRIES),A
+WMI:
+	CALL	MAPTRK
+	CALL	GETTRK		; WHAT TRACK DO WE WANT?
+	CP	(HL)
+	CALL	NZ,SEEK		; IF NOT THERE, GO THERE
+	JR	NZ,RWFAIL	; IN CASE SEEK FAILS
+
+;	TRACK SHOULD BE OK, BUT WE NEED TO SEND IT ANYWAY IN
+;       CASE THE LAST UNIT WAS DIFFERENT (THERE'S ONLY ONE TRACK
+;	REGISTER). THEN LOAD SECTOR AND DO IT...
+
+	CALL	GETTRK
+	OUT	(WTRK),A
+	CALL	GETSEC
+
+; CHECK FOR DSDD TO ADD SECTOR BIAS IF NOT 'E' DRIVE
+
+	LD	E,A		; Save sector # for a moment
+	LD	A,(PHYDRV)	; See if this is the E-disk
+	CP	04H		; .  (E-disk is drive "4")
+	LD	A,0		; Restore sector #
+	JR	Z,NOBIAS	; No sector bias if 'E' drive
+	PUSH	HL
+	PUSH	DE
+	CALL	GETTYPE		; get disk type
+	POP	DE
+	POP	HL
+	AND	0C0H		; Isolate DD, DS indicators
+	CP	0C0H		; Check DD and DS
+	LD	A,0		; .
+	JR	NZ,NOBIAS	; Not DSDD, no bias
+	ADD	A,DSBIAS	; Add double sided bias
+NOBIAS:
+	ADD	A,E		; Add sector # to bias
+	OUT	(WSEC),A	; Send sector # to FDC
+	CALL	SETUP		; Select unit and real side
+	CALL	GETBUF		; 
+	LD	A,2		; Set up internal retry counter
+	LD	(INT$RETRIES),A	; .
+	di
+	LD	A,(RWHOST)	; Test for read (1) or write (0)
+	OR	A		; .
+	JP	NZ,RDS		; .
+	CALL	WRDAT		; Write sector
+	ei
+	JR	NZ,RWFAIL	; Try again if failed
+	RET			; Otherwise return
+
+RDS:	LD	A,FREADS	; Indicate read sector
+	CALL	RDATA		; Read sector
+	ei
+	JR	NZ,RWFAIL	; Try again if failed
+	RET			; Otherwise return
+
+RWFAIL:	CALL	RESTORE		; Restore to track 00 on failure
+	LD	HL,TRIES	; Point to retry counter
+	DEC	(HL)		; Bump it closer to doom
+	JR	NZ,WMI		; and try again if we can . . .
+	LD	A,01		; No more tries left
+	LD	(ERFLAG),A	; Set error flag
+	RET			; and return to BDOS w/error
+
+;	*	*	*	*	*	*	*	*
+;
+;  WRDAT	Floppy disk write data routine
+;
+;  This routine writes the data pointed to by the HL register to
+;  the currently selected floppy.
+;
+;  The number of bytes written is determined by the FDC controller
+;  and the ID string currently active for this sector.
+;
+;  Multiple sector transfers are not supported.
+;
+;  NOTE:  The fastest way to test for busy and DRQ is to shift the
+;  status bit right into the carry bit.  Therefore, when busy drops,
+;  the ending status is still shifted right.  The checks for lost
+;  data, write protect, record not found, and crc error must take
+;  this bit shift into account.
+;
+;	*	*	*	*	*	*	*	*
+WRDAT:
+	LD	(FRWPTR),HL	; Save data ptr in case intr
+	CALL	DWAIT		; Wait until the FDC is ready
+WRDAT2:
+	LD	A,FWRITES	; Set up write sector command
+	LD	HL,(FRWPTR)	; .
+	CALL	OUTCMD		; Send the command to the FDC
+
+WR:	IN	A,(STAT)	; Get FDC status
+	RRA			; Test busy bit
+	JR	NC,WRDONE	; Exit if no busy bit
+	RRA			; Test DRQ bit
+	JR	NC,WR		; Test status again if no DRQ
+	LD	A,(HL)		; Busy & DRQ ==> OK to write data
+	OUT	(WDAT),A	; .
+	INC	HL		; Bump pointer to next byte
+	JP	WR		; Repeat as long as busy is active
+
+WRDONE:	BIT	1,A		; Test for lost data
+	JR	NZ,WRDAT2
+				; Lost data -- Try write cmd again
+
+WRNLD:	AND	02CH		; Test for WP, RNF, or CRC
+	RET	Z		; All ok if zero
+	LD	A,(INT$RETRIES)	; Get # of internal retries left
+	DEC	A		; Bump count one closer to doom!
+	LD	(INT$RETRIES),A	; Save count
+	JP	P,WRDAT2	; Try again if 0, 1, or 2
+	RET			; Otherwise return with NZ status
+
+;	*	*	*	*	*	*	*	*
+;
+;  RDATA	Floppy disk read data routine
+;
+;  This routine reads the data from the currently selected floppy
+;  into the area pointed to by the HL register.  This data is from
+;  a read address or read data command.
+;
+;  The number of bytes read is determined by the 1770 controller
+;  and the ID string currently active for this sector.
+;
+;  Multiple sector transfers are not supported.
+;
+;  NOTE:  The fastest way to test for busy and DRQ is to shift the
+;  status bit right into the carry bit.  Therefore, when busy drops,
+;  the ending status is still shifted right.  The checks for lost
+;  data, record not found, and crc error must take this bit shift
+;  into account.
+;
+;	*	*	*	*	*	*	*	*
+RDATA:
+	LD	(FRWCMD),A	; Save command and data pointer
+	LD	(FRWPTR),HL	; .  (in case we're interrupted)
+	CALL	DWAIT		; Make sure FDC is ready
+RDATA2:
+	LD	A,(FRWCMD)	; Get command and data pointer
+	LD	HL,(FRWPTR)	; .
+	CALL	OUTCMD		; Send command to FDC
+RD:
+	IN	A,(STAT)	; Get FDC status
+	RRA			; Test busy bit
+	JR	NC,RDDONE	; Exit if no busy bit
+	RRA			; Test DRQ bit
+	JR	NC,RD		; Test status again if no DRQ
+	IN	A,(RDAT)	; Busy & DRQ ==> OK to read data
+	LD	(HL),A		; .
+	INC	HL		; Bump pointer to next byte
+	JP	RD		; Repeat as long as busy is active
+RDDONE:
+	BIT	1,A		; Test for lost data
+	JR	NZ,RDATA2
+				; Lost data -- try read again
+RDNCD:
+	AND	0CH		; Test for RNF or CRC
+	RET	Z		; All ok if zero
+	LD	A,(INT$RETRIES)	; Get # of internal retries left
+	DEC	A		; Bump count one closer to doom!
+	LD	(INT$RETRIES),A	; Save count
+	JP	P,RDATA2	; Try again if 0, 1, or 2
+	RET			; Otherwise return with NZ status
+
+;	*	*	*	*	*	*	*	*
+;
+;  OUTCMD	Issue a cmd to the 1770 floppy controller
+;
+;	*	*	*	*	*	*	*	*
+OUTCMD:
+	CALL	MOTOR		; Insure motor on
+OC0:	OUT	(CMND),A	; Send command to FDC
+	LD	A,15		; Wait 60 us for cmd to set up
+OC1:	DEC	A		; . 15 x 4 usec
+	JR	NZ,OC1
+	RET
+
+;	*	*	*	*	*	*	*	*
+;
+;  MOTOR	Start floppy  drive motor
+;
+;  This routine starts the target motor by executing a read address
+;  command.  The xTRK, xSEC, and xDAT registers of the 1770 must be
+;  saved as the read address command alters their contents.  After
+;  the read address command, we have 2 seconds (10 index pulses) to
+;  execute the next command before the motor shuts off.
+;
+;	*	*	*	*	*	*	*	*
+MOTOR:
+	PUSH	AF		; save command
+	IN	A,(STAT)	; Check motor on bit
+	RLA			; .
+	JR	C,MOTOROK	; Motor already on ...
+	PUSH	HL		; Save buffer pointer
+	IN	A,(RTRK)	; Save 1770 trk, sec, & dta regs
+	LD	B,A		; .
+	IN	A,(RSEC)	; .
+	LD	C,A		; .
+	IN	A,(RDAT)	; .
+	LD	D,A		; .
+	CALL	DWAIT		; Wait for the 1770 to get ready
+	XOR	A		; Setup seek to same track cmd
+	OUT	(WTRK),A	; .
+	OUT	(WDAT),A	; .
+	LD	A,FSEEKNV	; .  (seek, no verify)
+	OUT	(CMND),A	; Send the cmd
+
+	PUSH	BC		; Save BC reg for wait cmd
+	LD	A,4		; Wait 4 * 250ms = 1 second
+WAITMORE:
+	PUSH	AF		; Wait 250ms
+	LD	A,250		; .
+	CALL	WAIT		; .
+	POP	AF		; .
+	DEC	A		; More waiting?
+	JR	NZ,WAITMORE
+	POP	BC		; Get BC reg back
+
+	LD	A,D		; Restore 1770 registers
+	OUT	(WDAT),A	; .
+	LD	A,C		; .
+	OUT	(WSEC),A	; .
+	LD	A,B		; .
+	OUT	(WTRK),A	; .
+	POP	HL		; restore buffer pointer
+
+MOTOROK:
+	POP	AF		; Get command back
+	RET			; and return
+
+;	*	*	*	*	*	*	*	*
+;
+;  DWAIT	Wait for permission to write a register
+;
+;  This routine will wait up to 5 seconds for permission to write
+;  to one of the FDC registers.  After 5 seconds, a FORCE INTERRUPT
+;  command will be issued to the FDC.
+;
+;	*	*	*	*	*	*	*	*
+DWAIT:
+	LD	HL,TIMEOUT	; Point to timeout location
+	LD	(HL),6		; Set 6 major loops
+
+DLOOP:	IN	A,(STAT)	; Get FDC status
+	BIT	0,A		; Test bit 0 (BUSY), return with
+	RET	Z		; .  zero status if busy non-active
+	DEC	HL		; See if enough minor loops
+	LD	A,H		; .  (Approx 58,000 times)
+	OR	L		; .
+	JP	NZ,DLOOP	; Not done with minor loop
+
+	LD	HL,TIMEOUT	; Decrement major loop counter
+	DEC	(HL)		; .  (6 times)
+	JP	NZ,DLOOP	; .
+	LD	A,0D0H		; Give up on waiting; issue a FORCED
+	OUT	(CMND),A	; .  INTERRUPT to the FDC
+	XOR	A		; Set A to 0FFH and status to NZ
+	DEC	A		; .
+	RET			; Return to caller
+
+;	*	*	*	*	*	*	*	*
+;
+;  RESTORE	Restore a floppy drive to track 00
+;
+;  This routine issues a re-zero command to the 1770 which causes
+;  the drive indicated by LOGDSK to slowly find its way back to 
+;  the track zero (00) sensor.
+;
+;	*	*	*	*	*	*	*	*
+RESTORE:			; Restore the disk head to track 00
+	CALL	DWAIT		; Wait for the 1770 to be ready
+	RET	NZ		; Return to caller if timeout
+	CALL	GETSTEP		; Get the step rate for this drive
+	OR	FRESTOR		; Add restore command to step rate
+	CALL	OUTCMD		; Send the cmd to the 1770
+	CALL	DWAIT		; Wait for the cmd to finish
+	LD	A,50		; Wait 50 ms for the drive to settle
+	CALL	WAIT		; .
+	CALL	MAPTRK		; Set this drive's last track
+	LD	(HL),0		; .  to track 00
+
+NEXT$BLIP:
+	LD	A,FRDADDR	; Send the READ ADDRESS cmd to the
+	CALL	OUTCMD		; .  FDC and see if we get anything
+	CALL	DWAIT		; Return if cmd finished (implies
+
+	RET	Z		; .  both disk & drive present)
+	LD	C,BELL		; Beep if no disk
+	CALL	CONOUT1		; .
+	CALL	CONST1		; Check console status
+	CALL	NZ,CONIN1	; Get char if one is there
+	CP	CTRLC		; Was the char a ctrl-C?
+	JR	Z,UABORT	; Yes, abort with error
+	CP	ESC		; Was the char an ESC?
+	JR	NZ,NEXT$BLIP	; No, try again
+UABORT:
+	XOR	A		; Return with error
+	DEC	A		; .
+	RET			; .
+
+;	*	*	*	*	*	*	*	*
+;
+;  SEEK		Seek to track (floppy only)
+;
+;  Moves the floppy head to the track indicated by CPMTRK if not
+;  already there.
+;
+;	*	*	*	*	*	*	*	*
+SEEK:
+	CALL	MOTOR		; Make sure the motor is on
+	CALL	GETTRK		; Get track we want
+	PUSH	AF		; Save track #
+	CALL	SETUP		; Set up unit and real side
+	POP	AF		; Get track # back
+	CALL	MAPTYPE		; Check double step bit
+	BIT	6,(HL)		; .
+	JR	Z,NODS1		; Skip double step if bit clear
+	ADD	A,A		; Otherwise multiply by 2
+NODS1:	
+	OUT	(WDAT),A	; Tell the 1770 where we want to go
+
+	CALL	MAPTRK		; Get the current track #
+	LD	A,(HL)		; .
+	CALL	MAPTYPE		; Check double step bit
+	BIT	6,(HL)		; .
+	JR	Z,NODS2		; Skip double step if bit clear
+	ADD	A,A		; Otherwise multiply by 2
+NODS2:
+	OUT	(WTRK),A	; Tell the 1770 where we are
+	CALL	GETSTEP		; Get the step rate for this drive
+	OR	FSEEKNV		; OR in seek without verify cmd
+	PUSH	AF		; Save A reg as DWAIT destroys it
+	CALL	DWAIT		; Wait until 1770 is ready
+	POP	AF		; Get A reg back (1770 cmd)
+	CALL	OUTCMD		; Send the cmd
+	CALL	DWAIT		; Wait for the cmd to finish
+	AND	18H		; Isolate possible failures
+	RET	NZ		; Seek failed, return error
+
+	LD	A,FRDADDR	; Read current track info
+	LD	HL,IDSAVE	; .
+	CALL	RDATA		; .
+	CALL	MAPTRK		; Get ptr to track save area
+	CALL	GETTRK		; Get track we were seeking
+	LD	B,A		; Save it for a moment
+	IN	A,(RSEC)	; Get track # from the FDC
+	CP	B		; Compare to what we wanted
+	LD	(HL),A		; Save FDC track # in either case
+	RET			; Z=ok, NZ=error
+
+;	*	*	*	*	*	*	*	*
+;
+;  GETSTEP	Get the step rate for a particular drive
+;
+;  Sets the HL register pair to the location which contains the 
+;  step rate for the drive indicated by PHYDRV, and returns the
+;  actual step bits in the A register.
+;
+;  Registers modified:	A, PSW, DE, HL
+;
+;	*	*	*	*	*	*	*	*
+GETSTEP:
+	LD	A,(PHYDRV)	; Get physical drive unit
+	CP	04		; E-disk?
+	JR	NZ,GET$AD	; No,  use normal unit #
+	LD	A,(EDSD)	; Yes, use E-disk unit #
+GET$AD:
+	LD	E,A		; Get step rate from table
+	LD	D,0		; .  (based on physical unit)
+	LD	HL,STPRAT	; .
+	ADD	HL,DE		; .
+	LD	A,(HL)		; .
+	AND	03H		; Mask off junk, just in case
+	RET			; And return data in A and HL
+
+;	*	*	*	*	*	*	*	*
+;
+;  MAPTYPE	Get pointer to physical type byte
+;
+;  Sets the HL register pair to the location which contains the 
+;  type byte for the physical drive indicated by PHYDRV.
+;
+;  The format of the physical type bytes can be found in the 
+;  description of DRIVE$TYPES at BIOS+070H.
+;
+;  Registers modified:	DE, HL
+;
+;	*	*	*	*	*	*	*	*
+MAPTYPE:
+	PUSH	AF		; Save entry A reg and flags
+	LD	A,(PHYDRV)	; Get physical drive unit
+	LD	E,A		; Compute pointer to physical
+	LD	D,0		; .  type byte
+	LD	HL,DRIVE$TYPES	; .
+	ADD	HL,DE		; .
+	POP	AF		; Get A reg and flags back
+	RET			; And return with ptr in HL
+
+;	*	*	*	*	*	*	*	*
+;
+;  MAPTRK	Return pointer to current track
+;
+;  Sets the HL register pair to the location which contains the 
+;  current track for the drive indicated by PHYDRV.
+;
+;  Registers modified:	A, PSW, DE, HL
+;
+;	*	*	*	*	*	*	*	*
+MAPTRK:
+	LD	A,(PHYDRV)	; Get physical drive unit
+	CP	04		; E-disk?
+	JR	NZ,MAP$AD	; No,  use normal unit #
+	LD	A,(EDSD)	; Yes, use E-disk unit #
+MAP$AD:
+	LD	E,A		; Compute ptr to current track
+	LD	D,0		; .
+	LD	HL,LTRACK	; .
+	ADD	HL,DE		; .
+	RET			; Return with pointer in HL
+
+;	*	*	*	*	*	*	*	*
+;
+;  SETUP	Setup the system control register for a drive select
+;
+;  This routine writes to the system control port register at I/O
+;  00H, causing the associated drive to be selected, along with
+;  the head select signal line.
+;
+;  NOTE:  This routine always turns the internal system rom OFF,
+;  without any regard for those who just may have the rom enabled
+;  prior to entry.
+;
+;  NOTE:  This routine modifies all registers
+;
+;	*	*	*	*	*	*	*	*
+SETUP:
+	CALL	MAPTYPE		; Get pointer to drive type byte
+	LD	A,(HL)		; Get byte
+	OR	040H		; Turn off EPROM
+	LD	HL,HSTSID	; Point to side select
+	OR	(HL)		; Include proper side select
+
+	LD	C,A		; Save control byte
+	AND	10001111B	; Mask out eprom, density, & side
+	LD	HL,CHGDSK	; Compare with previous results
+	CP	(HL)		; .
+	LD	(HL),A		; .  (save this result anyway)
+	JR	Z,SETUP2	; Skip split & delay if same
+
+	LD	A,C		; Get control byte back
+	AND	0F0H		; Mask out drive bits
+	OUT	(CONT),A	; Send speed only to control port
+	LD	A,C		; Get control byte back
+	OUT	(CONT),A	; Send full byte to the control port
+
+	LD	A,HLDELAY	; Delay HLDELAY ms (usually 30ms)
+	CALL	WAIT		; .
+	RET
+SETUP2:
+	LD	A,C		; Get control byte back
+	OUT	(CONT),A	; Send to control port
+	RET
+
+;	*	*	*	*	*	*	*	*
+;
+;  WAIT		Wait "A" ms
+;
+;  Modifies:	A,PSW  (A = 0, Z flag set)
+;
+;	*	*	*	*	*	*	*	*
+WAIT:
+	PUSH	BC
+WAIT1:
+	LD	B,199
+WAIT2:	CP	(HL)
+	DJNZ	WAIT2
+	DEC	A
+	JR	NZ,WAIT1
+	POP	BC
+	RET
+
+;	*	*	*	*	*	*	*	*
+;
+;  GETTYPE	Get the type byte and ptr for a drive unit
+;
+;  Returns the current disk type identifier in the A reg, and the
+;  address of the entry in the HL reg pair.
+;
+;  See PHYTAB (driver table) for the definition of the type byte.
+;
+;  Modifies:	A, DE, HL
+;
+;	*	*	*	*	*	*	*	*
+GETTYPE:
+	LD	A,(LOGDSK)	; Use logical disk entry value
+	CALL	PAGET		; Get ptr to table entry
+	INC	HL		; Type byte is at table+2
+	INC	HL		; .
+	LD	A,(HL)		; Get type byte
+	RET			; Return type in A, ptr in HL
+
+GETSEC:				; CONVERT LOGICAL SECTOR TO PHYSICAL SECTOR
+	PUSH	HL
+	CALL	GETTYPE
+	AND	3		; 128 BYTE SECTOR?
+	LD	A,(CPMSEC)	; NOPE, DO MAPPING
+	JR	Z,GOTSDS
+	LD	A,(HSTSEC)
+
+GOTSDS:	PUSH	AF		; SAVE SECTOR
+	CALL	GETDPT		; FETCH POINTER TO XLT TABLE
+	LD	E,(HL)
+	INC	HL
+	LD	D,(HL)
+	EX	DE,HL		; TRANSLATE TABLE NOW IN HL
+	POP	AF		; RESTORE DESIRED SECTOR
+	LD	E,A
+	LD	D,0
+	ADD	HL,DE
+	LD	A,(HL)		; GET PHYSICAL SECTOR FROM TABLE
+	LD	E,A		; SAVE IT
+	LD	A,(PHYDRV)
+	CP	04H		; WAS IT E DISK?
+	JR	NZ,GSEXIT	; NO, THEN NO ADJUST
+	LD	A,(HSTSID)	; WHICH SIDE?
+	OR	A
+	JR	Z,GSEXIT
+	LD	A,(ESECADJ)	; ELSE GET ADJUSTMENT
+	ADD	A,E
+	LD	E,A		; PUT IT BACK FOR MOVE
+
+GSEXIT:	LD	A,E		; MOVE REAL SECTOR TO A
+	POP	HL
+	RET
+
+GETBUF:	CALL	GETTYPE		; GET THE DMA ADDRESS
+	AND	3		; 128 BYTE SECTORS?
+	LD	HL,HSTBUF	; USED FOR DD
+	RET	NZ
+	LD	HL,(DMAADR)	; ELSE USE REAL DMA ADDRESS...
+	RET
+
+;	*	*	*	*	*	*	*	*
+;
+;  GETTRK	Convert logical to physical track
+;
+;  This routine converts the logical track stored in CPMTRK to
+;  the actual physical track and side to be used.
+;
+;  The physical track is returned in the A register, and the side
+;  to be used is returned in HSTSID.
+;
+;	*	*	*	*	*	*	*	*
+GETTRK:	PUSH	HL		; Save HL register
+	CALL	GETTYPE		; Get the type byte for this disk
+	LD	HL,HSTSID	; Point to the side flag
+	RLA			; Determine SS or DS
+	RLA			; .
+	LD	A,(CPMTRK)	; Get track #
+	JR	NC,GETTRK1	; Not DS -- leave track alone
+	RRA			; Divide track by 2 to get side
+	JR	NC,GETTRK1	; No carry means side 0
+	LD	(HL),10H	; Indicate side 1
+	JP	GETTRK2		; And finish up
+GETTRK1:
+	LD	(HL),0		; Indicate side 0
+GETTRK2:
+	POP	HL		; Get HL register back
+	AND	07FH		; Mask high bit, just in case
+	RET			; ... and return
+
+;	LOGICAL DEVICE	  PHYSICAL DEVICE ASSIGNMENTS
+;	--------------	  ---------------------------
+;	CON:		  CRT: OR TTY:
+;	READER: 	  TTY:
+;	PUNCH:		  TTY:
+;	LIST:		  CRT: OR TTY: OR LPT:
+
+CONST:				; CONSOLE STATUS, RETURNS 0FFH IF CHARACTER READY, ELSE 00H
+	LD	(OLDSTK),SP	; ld(oldstk),sp - save old stack
+	LD	SP,LOCSTK	; set local stack
+CONST1:	
+	LD	A,(IOBYTE)	; CHECK DEVICE ASSIGNMENT
+	AND	11B		; KEEP CON BITS ONLY
+	JP	Z,TTYIST	; check appropriate input status
+	JP	CRTIST		; no third or fourth choices
+
+CONIN:				; CONSOLE CHARACTER INTO REGISTER A
+	LD	(OLDSTK),SP	; save old stack
+	LD	SP,LOCSTK	; local stack
+CONIN1:
+	LD	A,(IOBYTE)
+	AND	11B
+	jp	nz,CRTIN	; do crtin
+	CALL	TTYIN		; do ttyin
+	AND	07FH		; strip parity bit from console input
+	RET
+	
+
+CONOUT:				; CONSOLE CHARACTER OUTPUT FROM REGISTER C
+	LD	(OLDSTK),SP	; ld(oldstk),sp - save old stack
+	LD	SP,LOCSTK	; set local stack
+CONOUT1:
+	LD	A,(IOBYTE)
+	AND	11B
+	JP	Z,TTYOUT	; out tty
+	JP	CRTOUT		; out crt
+	
+CONPEEK:
+	LD	(OLDSTK),SP
+	LD	SP,LOCSTK
+	LD	A,(IOBYTE)
+	AND	11B
+	JR	Z,TTYPEEK
+CRTPEEK:
+	CALL	CRTIST		; READY?
+	RET	Z		; NO, return 0
+	LD	HL,(KEYST)	; first character position
+	JR	PEEKCHR
+TTYPEEK:
+	CALL	TTYIST
+	RET	Z
+	LD	HL,(MdmIst)	; point to start of modem queue
+PEEKCHR:
+	LD	A,(HL)		; get character
+	OR	A
+	RET
+	
+
+LISTST:				; RETURN LIST STATUS, 0FFH IF READY, ELSE 00H
+	LD	(OLDSTK),SP	; ld(oldstk),sp - save old stack
+	LD	SP,LOCSTK	; local stack
+LSTST1:	LD	A,(IOBYTE)	; CHECK DEVICE ASSIGNMENT
+	AND	11000000B	; KEEP LST BITS ONLY
+	JR	NZ,LSTST2	; tty ?
+	JP	TTYOST		; check tty output status
+
+LSTST2:	AND	01000000B	; CRT?
+	JR	Z,LPTST		; lpt
+	JR	CRTOST		; crt
+
+LSTOUT:				; LIST CHARACTER OUTPUT FROM REGISTER C
+	LD	(OLDSTK),SP	; ld(oldstk),sp - save old stack
+	LD	SP,LOCSTK	; set stack pointer
+LIST1:	
+	CALL	LSTST1		; WAIT TILL READY TO SEND
+	JR	Z,LIST1
+	LD	A,(IOBYTE)	; CHECK DEVICE ASSIGNMENT
+	AND	11000000B	; KEEP LST BITS ONLY
+	JP	Z,TTYOUT
+	CP	01000000B
+	JR	Z,CRTOUT
+	JR	LPTOUT		; no forth choice
+
+LPTOUT:				; PRINTER CHARACTER OUTPUT FROM REGISTER C
+	CALL	LPTST		; PRINTER READY?
+	JR	Z,LPTOUT	; not ready, wait
+	LD	A,C
+	OUT	(PIO1),A	; SET UP THE DATA
+	OUT	(STBSET),A	; SEND A DATA STROBE
+	OUT	(STBCLR),A	;  (DATA DOESN'T MATTER)
+	RET
+
+LPTST:				; RETURN LIST STATUS, 0FFH IF READY, ELSE 00H
+	ld	a,(SioBstatus)	;
+	AND	PRTRDY		;
+	RET	Z		; NOT READY
+	OR	255		; SHOW READY
+	RET
+
+CRTOST:				; CRT OUTPUT STATUS
+	in	a,(SIOCPA)	; RETURN 0FFH IF READY TO SEND, 00H IF NOT
+	and	TBE
+	ret	z		; transmitter buffer not empty
+	LD	A,(HSA)		; see if cts h/s required
+	OR	A
+	JR	Z,CRTRDY	; if zero, no handshake needed
+	ld	a,(SioAstatus)
+	AND	CTS
+	RET	Z		; CTS NOT ACTIVE
+CRTRDY:	OR	255		; SHOW READY TO END
+	RET
+
+CRTIST:				; CRT INPUT STATUS, RETURN 0FFH IF DATA READY, 00H IF NOT
+	ld	a,(keylen)
+	or	a
+	ret	z		; if same exit, nothing in buffer
+	or	0ffh		; show buffer has character
+	RET
+
+CRTOUT:
+	CALL	CRTOST		; OK TO SEND?
+	JR	Z,CRTOUT	; NO WAIT
+	LD	A,C		; CHARACTER TO REGISTER A
+	OUT	(SIODPA),A
+	RET
+
+CRTIN:
+	CALL	CRTIST		; READY?
+	JR	Z,CRTIN		; NO, WAIT
+	di			; leave me alone while I'm playing with
+	ld	hl,keylen	; the queue
+	dec	(hl)		; dec # of chars in keyboard queue
+	LD	HL,(KEYST)	; first character position
+	ld	a,(hl)		; get character
+	INC	HL
+	LD	(KEYST),HL	; next character
+	JR	NZ,krex		; 
+	LD	HL,KEYBUF	; reset buffer start and end
+	LD	(KEYST),HL
+	LD	(KEYEND),HL
+krex:	ei			; ok, i'm done
+	RET
+;
+; tty output status, return 0ffh if ready to send, 00h if not
+;
+TTYOST:
+	ld	a,(MdmOlen)	; get current size of output buffer
+	sub	MdmOsize+1	; compare to maximum buffer size + 1 char for
+				; transmit buffer
+	ret	z		; buffer is full, not ready to send
+	or	0ffh		; some left, ok to send
+	ret
+
+TTYIST:				; TTY INPUT STATUS, RETURN 0FFH IF DATA READY, 00H IF NOT
+	ld	a,(MdmIlen)
+	or	a
+	ret	z
+	or	0ffh
+	RET
+
+PUNCH:				; PUNCH CHARACTER FROM REGISTER C
+TTYOUT:
+	CALL	TTYOST		; OK TO SEND?
+	JR	Z,TTYOUT	; No wait
+	ld	hl,MdmOlen	; any chars outstanding (either on queue
+	di			; or in transmit buffer)?
+	ld	a,(hl)
+	inc	(hl)		; bump # chars outstanding
+	or	a
+	jr	nz,punch1	; yes, place in queue
+	LD	A,C		; CHARACTER TO REGISTER A
+	OUT	(SIODPB),A
+	ei
+	RET
+punch1:	ld	hl,(MdmOend)
+	ld	(hl),c		; add char to queue
+	inc	hl		; increment to next empty position
+	ld	a,MdmOstop
+	cp	l		; check for wrap at end of buffer
+	jr	nz,punch2
+	ld	hl,MdmObuf	; wrap to start of buffer
+punch2:	ld	(MdmOend),hl	; update tail pointer
+	ei
+	ret	
+
+READER:				; READ CHARACTER INTO REGISTER A FROM READER DEVICE
+TTYIN:
+	call	TTYIST
+	jr	z,TTYIN
+	di
+	ld	hl,(MdmIst)	; point to start of modem queue
+	ld	a,(hl)		; get key from queue
+	push	af		; and save it...
+	inc	hl		; point to next available key
+	ld	a,MdmIstop
+	cp	l		; check for wrap at end of buffer
+	jr	nz,ttyin1
+	ld	hl,MdmIbuf	; wrap to start of buffer
+ttyin1:	ld	(MdmIst),hl	; update head pointer
+	ld	hl,MdmIlen
+	dec	(hl)		; decrement # keys in buffer
+	ld	a,(hl)
+	cp	MdmIsize/2	; coming down from large buffer
+	jr	nc,ttyin2	; no, no need to turn on RTS
+	ld	a,5		; select SIO reg 5
+	out	(SIOCPB),a
+	ld	hl,SIOBR5
+	ld	a,(hl)		; get current reg 5 setting
+	or	00000010b	; turn on RTS
+	out	(SIOCPB),a	; and update SIO
+	ld	(hl),a		; update current reg 5 setting
+ttyin2:
+	ei
+	pop	af		; restore key value
+	ret
+;
+; TTYBRK: send 300mS break to modem
+;
+TTYBRK:
+	ld	a,5		; select register 5
+	di
+	out	(SIOCPB),a
+	ld	hl,SIOBR5
+	ld	a,00010000b	; set break bit on
+	or	(hl)		; or in current settings
+	ld	(hl),a		; update current
+	out	(SIOCPB),a	; send break
+	ei
+	ld	b,300/8		; # 8 mS transitions to look for
+	in	a,(CTCA3)	; get 8mS counter value
+	ld	c,a
+TTYBLP:
+	in	a,(CTCA3)	; get current tick value
+	cp	c		; changed?
+	jr	z,TTYBLP	; no, still on current tick
+	ld	c,a		; 8mS passed, update tick value
+	djnz	TTYBLP
+	di
+	ld	a,5
+	out	(SIOCPB),a	; restore original reg5 in SIO/DART
+	ld	a,11101111b	; set break bit off
+	and	(hl)		; and off break bit
+	ld	(hl),a		; update current setting
+	out	(SIOCPB),a
+	ei
+	ret
+;
+; special Rx condition on channel A
+;
+keyerr:
+	push	af
+	ld	a,1		; read error register
+	out	(SIOCPA),a
+	in	a,(SIOCPA)
+	ld	a,30h		; reset errors
+	out	(SIOCPA),a
+	in	a,(SIODPA)	; read bad char
+	pop	af
+	ei
+	reti
+;
+; special Rx condition on channel B
+;
+mdmerr:
+	push	af
+	ld	a,1		; read error register
+	out	(SIOCPB),a
+	in	a,(SIOCPB)
+	ld	a,30h		; reset errors
+	out	(SIOCPB),a
+	in	a,(SIODPB)	; read bad char
+	pop	af
+	ei
+	reti
+;
+; Keychk: keyboard input interrupt
+;
+KEYCHK:	
+	PUSH	AF
+	PUSH	HL		; save 'hl'
+	LD	HL,(KEYEND)	; next character position in buffer
+	LD	A,KEYSTOP	; get low byte of max addr
+	CP	L		; see if end of buffer
+	IN	A,(SIODPA)	; get data
+	JR	Z,KEYEXT	; no more buffer available
+	AND	7FH		; strip parity
+	LD	(HL),A		; save char
+	INC	HL		; next position in buffer
+	LD	(KEYEND),HL	; save new pointer
+	ld	hl,keylen	; bump # of keys in queue
+	inc	(hl)
+KEYEXT:	POP	HL
+	POP	AF
+	ei
+	reti
+;
+; mdmchk: modem input interrupt
+;
+mdmchk:
+	push	af
+	push	hl
+	ld	hl,MdmIlen	; get # of chars in modem queue
+	ld	a,MdmIsize	; already at peak size?
+	cp	(hl)
+	in	a,(SIODPB)	; get char
+	jr	z,mdmext	; queue full, discard
+	inc	(hl)		; bump # of chars in modem queue
+	ld	hl,(MdmIend)	; get tail pointer
+	ld	(hl),a		; store char in queue
+	inc	hl		; advance to next available pos'n
+	ld	a,MdmIstop	; time to wrap around?
+	cp	l
+	jr	nz,mdmchk1	; no wrap
+	ld	hl,MdmIbuf	; wrap to start of buffer
+mdmchk1:
+	ld	(MdmIend),hl	; update tail pointer
+	ld	a,(MdmIlen)	; check to see if it's time to turn
+mdmctf	equ	(MdmIsize*9)/10
+	cp	mdmctf		; off RTS (buffer 90% full?)
+	jr	c,mdmext
+	ld	a,5		; select SIO reg 5
+	out	(SIOCPB),a
+	ld	hl,SIOBR5
+	ld	a,(hl)		; get current reg 5 setting
+	and	11111101b	; turn off RTS
+	out	(SIOCPB),a	; and update SIO
+	ld	(hl),a		; update reg 5 setting
+mdmext:	pop	hl
+	pop	af
+	ei
+	reti
+;
+; keysts: status change on keyboard channel
+;
+keysts:
+	push	af
+	in	a,(SIOCPA)	; read RR0
+	ld	(SioAstatus),a	; store DCD, CTS, RI and BREAK condition
+	ld	a,10h		; reset external/status interrupts
+	out	(SIOCPA),a
+	pop	af
+	ei
+	reti
+SioAstatus:	db	0
+;
+; mdmsts: status change on modem channel
+;
+mdmsts:
+	push	af
+	push	hl
+	in	a,(SIOCPB)	; read RR0
+	ld	(SioBstatus),a	; store DCD, CTS, RI and BREAK condition
+	ld	l,a
+	ld	a,10h		; reset external/status interrupts
+	out	(SIOCPB),a
+	bit	5,l		; CTS on?
+	ld	a,5		; select SIO reg 5
+	out	(SIOCPB),a
+	ld	hl,SIOBR5
+	ld	a,(hl)		; get current reg 5 setting
+	jr	nz,CTSon
+CTSoff:
+	and	11110111b	; turn off Tx Enable
+	jr	setCTS
+CTSon:
+	or	00001000b	; turn on Tx Enable
+setCTS:
+	out	(SIOCPB),a	; and update SIO
+	ld	(hl),a		; update reg 5 setting
+	pop	hl
+	pop	af
+	ei
+	reti
+SioBstatus:	db	0
+;
+; mdmTxE: channel B transmit buffer empty interrupt
+;
+mdmTxE:
+	push	af
+	push	hl
+	ld	hl,MdmOlen
+	dec	(hl)		; decr # chars outstanding
+	jr	z,mdmTxE2	; no chars outstanding now, dismiss interrupt
+	ld	hl,(MdmOst)	; get character to send
+	ld	a,(hl)
+	out	(SIODPB),a	; send it
+	inc	hl		; point to next char to send
+	ld	a,MdmOstop	; check for wrap at end of buffer
+	cp	l
+	jr	nz,mdmTxE1
+	ld	hl,MdmObuf	; wrap to start of buffer
+mdmTxE1:
+	ld	(MdmOst),hl	; update head pointer
+	jr	mdmTxEx
+mdmTxE2:
+	ld	a,28H		; reset Tx interrupt pending
+	out	(SIOCPB),a
+mdmTxEx:
+	pop	hl
+	pop	af
+	ei
+	reti
+;
+; CLKCHK will be called once every second from an interrupt from
+; CTC channel 3. Was adapted from the clock routines developed by
+; Roger Ward.
+;
+; Changed 05/04/89 to store date/time in format expected by
+; NOVAdos/SUPRBDOS/P2DOS. DATE and TIME utilites also modified to
+; reflect changes
+;
+; Changed 02/07/90 to be interrupt routine
+;
+CLKCHK:
+	PUSH	HL			; save registers
+	PUSH	AF
+	ld	hl,SECNT		; point to seconds
+	LD	A,(HL)			; increment BCD seconds
+	add	a,1			; NOTE: inc a doesn't work
+	DAA				; properly with DAA
+	LD	(HL),A
+	CP	60H
+	JR	NZ,CLKEXT		; exit if no rollover
+	LD	(HL),0			; seconds to ZERO
+;
+	DEC	HL			; point to minutes
+	LD	A,(HL)			; increment BCD minutes
+	add	a,1
+	DAA
+	LD	(HL),A
+	CP	60H
+	JR	NZ,CLKEXT		; exit if no rollover
+	LD	(HL),0			; minutes to ZERO
+;
+	DEC	HL			; point to hours
+	LD	A,(HL)
+	add	a,1
+	DAA
+	LD	(HL),A
+	CP	24H
+	JR	NZ,CLKEXT		; exit, same day still
+	LD	(HL),0			; hours to ZERO
+;
+	LD	HL,(JULCNT)
+	INC	HL			; increment # days since 1/1/78
+	LD	(JULCNT),HL
+;
+CLKEXT:
+	POP	AF
+	POP	HL
+ei$reti:
+	ei
+	reti
+;
+; tod: get/set system time
+;
+;Entry parameters:
+;
+; If getting time
+;	C = 000H to get time
+; If setting time
+;	C = 0FFH to set time
+;	HL = pointer to NOVAdos format time table
+;
+;Exit parameters:
+; If getting time
+;	HL = pointer to NOVAdos format time table with current time
+; If setting time
+;	none
+;
+TOD:
+	PUSH	AF
+	LD	A,C
+	OR	A
+	JR	Z,TODRD
+	PUSH	BC
+	PUSH	DE
+	PUSH	HL
+	LD	DE,JULCNT		; copy time info block
+	LD	BC,SECNT-JULCNT+1	; over system time
+	LDIR				; block current contents
+	POP	HL
+	POP	DE
+	POP	BC
+	POP	AF
+	RET	
+TODRD:
+	LD	HL,JULCNT		; return pointer to system time
+	POP	AF
+	RET
+;
+JULCNT:	DW	0			;\.
+HRCNT:	DB	0			; NOVAdos format date/time
+MINCNT:	DB	0			; info block
+SECNT:	DB	0			;/.
+;
+;	*	*	*	*	*	*	*	*
+;
+; LOCSTK is the common return point for operations that use
+;      the local bios stack. Routine reatores the callers
+;      stack pointer and returns.
+;	*	*	*	*	*	*	*	*
+; local stack area
+	DS	32		; 16 level stack
+LOCSTK:	DEFW	EXIT		; exit routine
+OLDSTK:	DS	2		; save area for old stack
+EXIT:	LD	SP,(OLDSTK)	; restore stack
+	RET
+
+;
+; Storage for buffered keyboard and modem
+;
+KEYST:		DEFW	KEYBUF	; Storage for begining of buffer pointer
+KEYEND:		DEFW	KEYBUF	; Storage for end of buffer pointer
+keylen:		defb	0
+
+MdmIst:		defw	MdmIbuf	; pointer to head of modem input buffer
+MdmIend:	defw	MdmIbuf	; pointer to tail of modem input buffer
+MdmIlen:	defb	0	; # keys in modem input buffer
+
+MdmOst:		defw	MdmObuf	; pointer to head of modem output buffer
+MdmOend:	defw	MdmObuf	; pointer to tail of modem output buffer
+MdmOlen:	defb	0	; # keys in modem output buffer
+MAINEND EQU	$		; End of main body of code
+
+;	*	*	*	*	*	*	*	*
+;
+;	HARD DISK Disk parameter blocks
+;
+;	A system configuration entry, or a user defined assembly
+;	is to be used to set up the track offset entry to create
+;	various hard disk partitions. This is done to support drives
+;	with greater than 20Mbyte storage.
+;
+;	*	*	*	*	*	*	*	*
+HD$DPB$BASE EQU	$
+;
+;		# of  --mask--  disk  # of   rsv'd  chk  trk
+;		sect  bs bm em  size  d ent  block  siz  ofs  x
+
+FPARM:	DEFB	64,0,  5,31, 1, 16,0, 255,3, 255,0, 0,0, 2,0, 0
+GPARM:	DEFB	64,0,  5,31, 1, 16,0, 255,3, 255,0, 0,0, 2,0, 0
+;HPARM:	DEFB	64,0,  5,31, 1, 16,0, 255,3, 255,0, 0,0, 2,0, 0
+;IPARM:	DEFB	64,0,  5,31, 1, 16,0, 255,3, 255,0, 0,0, 2,0, 0
+;JPARM:	DEFB	64,0,  5,31, 1, 16,0, 255,3, 255,0, 0,0, 2,0, 0
+;KPARM:	DEFB	64,0,  5,31, 1, 16,0, 255,3, 255,0, 0,0, 2,0, 0
+;LPARM:	DEFB	64,0,  5,31, 1, 16,0, 255,3, 255,0, 0,0, 2,0, 0
+;MPARM:	DEFB	64,0,  5,31, 1, 16,0, 255,3, 255,0, 0,0, 2,0, 0
+;NPARM:	DEFB	64,0,  5,31, 1, 16,0, 255,3, 255,0, 0,0, 2,0, 0
+;OPARM:	DEFB	64,0,  5,31, 1, 16,0, 255,3, 255,0, 0,0, 2,0, 0
+;PPARM:	DEFB	64,0,  5,31, 1, 16,0, 255,3, 255,0, 0,0, 2,0, 0
+
+HD$DPB$LEN 	EQU	$-HD$DPB$BASE
+MY$ID:		DEFB	0		; Board SCSI ID saved here
+HD$BYTE$BLOCK:	DEFB	0		; SCSI Byte/block mode saved here
+
+;	*	*	*	*	*	*	*	*
+;
+;  DIRECT SCSI DRIVER  
+;
+;  Entry here via the BIOS Jump tables as JMP SCSI
+;
+;  Enter with the following registers set:
+;
+;	A   SCSI target address to be used
+;	HL  Pointer to SCSI Command block
+;	DE  Pointer to SCSI Data Block
+;
+;  Exits with HL preserved.  DE is preserved if the operation is 
+;  successful, otherwise DE contains the sense data (error bytes).
+;  The A regisner contains the ending status of the SCSI command.
+;
+;  NOTE: This routine saves and restores the previous TARGET
+;	address for normal operations.
+;
+;	*	*	*	*	*	*	*	*
+SCSI:
+	LD	C,1		; Set C register for 1 byte block
+S$HSPEED:
+	LD	(TARGET),A	; Save target address
+	PUSH	HL		; Save entry command pointer
+	PUSH	DE		; .  and entry data pointer
+	LD	(CMDPTR),HL	; Set CMDPTR to what HL is pointing to
+	EX	DE,HL		; Set the data pointer to HL
+
+	CALL	S$CMD		; Do the direct routines
+
+	JP	Z,S$END$OK	; If ok, restore cmd & data ptrs
+	POP	HL		; Otherwise, throw away data ptr
+	JP	S$END$ERR	; .  by popping cmd pointer twice
+
+S$END$OK:
+	POP	DE		; Restore data pointer
+S$END$ERR:
+	POP	HL		; Restore command pointer
+	RET			; All done
+
+;
+;  SCSI return sense data command (Cmd 03)
+;
+S$STAT$CMD:
+	DEFB	3		; 00 - REQUEST SENSE COMMAND
+	DEFB	0		; 01 - LOGICAL UNIT
+	DEFB	0		; 02 - RESERVED
+	DEFB	0		; 03 - RESERVED
+	DEFB	4		; 04 - NUMBER OF BYTES
+	DEFB	0		; 05 - RESERVED
+
+;
+;  SCSI read/write command (Cmd 08/0A)
+;
+S$RD$CMD EQU	08H		; 08 IS READ DATA
+S$WR$CMD EQU	0AH		; 0A IS WRITE DATA
+
+S$RW$CMD:
+	DEFB	S$RD$CMD	; 00 - 08=Read, 0A=Write
+HIGH$ADDR:
+	DEFB	0		; 01 - High address
+MED$ADDR:
+	DEFB	0		; 02 - Middle address
+LOW$ADDR:
+	DEFB	0		; 03 - Low address
+	DEFB	1		; 04 - Number of sectors
+STEP$RATE:
+	DEFB	0		; 05 - Step rate (Xebec)
+
+;	*	*	*	*	*	*	*	*
+;
+;  Hard disk driver (Driver #3)
+;
+;	FF	Select Disk
+;	00	Write Disk
+;	01	Read Disk
+;
+;	*	*	*	*	*	*	*	*
+DRVR3:	INC	A		; select command = 0ffh
+	JP	Z,SELEND	; do select
+	LD	HL,TAGPHY	; Get address & step rate
+	LD	A,(HL)		; .
+	AND	0FH		; Mask off address
+	LD	(STEP$RATE),A	; Store step rate in SCSI cmd
+	INC	HL		; Bump ptr to unit #
+	LD	A,(HL)		; Get unit # & type 
+	AND	0E0H		; Mask off type
+	LD	(LOGUNIT),A	; Save unit #
+	INC	HL		; Bump ptr to SCSI addr
+	LD	A,(HL)		; Get SCSI address
+	LD	(TARGET),A	; Save as target address
+
+; fall through to S$IO and do the read/write
+
+;	*	*	*	*	*	*	*	*
+;
+;  SCSI READ/WRITE HOST ROUTINES
+;
+;  Entry here from the HOSTIO section of the blocking/deblock
+;  routines. Assumes that the TARGET address has been pre-set.
+;
+;  Exits with the error code in (A), and the sense status saved
+;  at S$STAT$DAT if an error occurs.
+;
+;	*	*	*	*	*	*	*	*
+S$IO:
+	LD	A,(RWHOST)
+	AND	A		; write = 0
+;
+;  Write to the hard disk described by (TARGET) and (LOGUNIT)
+;
+S$WR:
+	LD	A,S$WR$CMD	; Set write command 
+	JR	Z,S$DO$RW
+
+;
+;  Read from the hard disk described by (TARGET) and (LOGUNIT)
+;
+S$RD:
+	LD	A,S$RD$CMD	; Set read command
+
+;
+;  Do the rest of the setup for the read/write command
+;
+S$DO$RW:
+	
+	LD	HL,S$RW$CMD	; Get command string
+	LD	(HL),A		; Plug the SCSI command 
+	LD	(CMDPTR),HL	; Save the command pointer
+	CALL	BLD$S$SCTR	; Build SCSI sector address
+	LD	HL,HSTBUF	; Get pointer to host buffer
+	LD	A,(HD$BYTE$BLOCK) ; Get SCSI byte/block mode value
+	LD	C,A		; Stuff in C register
+
+;
+;  Enter here from the SCSI direct driver routine
+;
+;  Exits with status in A.  0FFH = timeout error
+;
+S$CMD:
+	LD	(DATPTR),HL	; Save the data pointer
+	LD	HL,INT$RETRIES	; retry save area
+	LD	(HL),2		; retries
+	LD	HL,S$IO$COUNT ; And the # of bytes to transfer
+	LD	(HL),C		; .  at one time (each block)
+
+S$CMD$RETRY:
+	CALL	SELECT		; Perform the SCSI operation
+	LD	A,(STATUS)	; Get the return status
+	LD	(ERFLAG),A	; Save ending status
+	CP	0FFH		; Timeout?
+	JR	Z,S$DONE	; Yes, go save timeout status
+	AND	2		; Check for SCSI error status
+	RET	Z		; No error -- return
+
+	LD	HL,INT$RETRIES	; see if any retries remain
+	DEC	(HL)
+	JR	Z,S$DONE	; NO more remain, exit and set flags
+
+; Save current command and data pointers.
+
+	LD	HL,(DATPTR)	; save old data pointer
+	LD	(SAVE$DATPTR),HL
+	LD	HL,(CMDPTR)	; save old command pointer
+	LD	(SAVE$CMDPTR),HL
+	LD	A,1
+	LD	(S$IO$COUNT),A ; force byte xfer mode for retries..
+
+; Request SCSI sense.
+
+	LD	HL,S$STAT$DAT ; .  for request sense command
+	LD	(DATPTR),HL
+	LD	HL,S$STAT$CMD ; Set up data and command pointers
+	LD	(CMDPTR),HL
+	LD	A,(LOGUNIT)	; Get logical unit number
+	INC	HL		; Stuff in proper location in
+	LD	(HL),A		; .  SCSI command
+	CALL	SELECT		; Execute request sense command
+
+; Restore pointers and retry command
+
+	LD	HL,(SAVE$DATPTR) ; restore old data pointer
+	LD	(DATPTR),HL
+	LD	HL,(SAVE$CMDPTR) ; restore old command pointer
+	LD	(CMDPTR),HL
+	JP	S$CMD$RETRY	; command retry
+
+S$DONE:
+	OR	A		; Set Z/NZ for user
+	RET			; and return
+
+;	*	*	*	*	*	*	*	*
+;
+;  Build 3-byte SCSI sector number and logical unit number
+;
+;  NOTE:  This routine assumes 16 sectors per track.
+;
+;  It is safe to assume 16 sectors per track even though some hard
+;  disk controllers format more (Xebec=17, Adaptec=18, etc.) as the
+;  read and write commands use a block number, rather than a track
+;  and sector number to move to the correct block to read or write.
+;
+;	*	*	*	*	*	*	*	*
+BLD$S$SCTR:
+	XOR	A		; Clear A & Carry
+
+				; A reg     C  HL reg pair
+	LD	HL,(CPMTRK)	; --------  -  FEDCBA9876543210
+	ADD	HL,HL		; --------  F  EDCBA9876543210-
+	RLA			; -------F  -  EDCBA9876543210-
+	ADD	HL,HL		; -------F  E  DCBA9876543210--
+	RLA			; ------FE  -  DCBA9876543210--
+	ADD	HL,HL		; ------FE  D  CBA9876543210---
+	RLA			; -----FED  -  CBA9876543210---
+	ADD	HL,HL		; -----FED  C  BA9876543210----
+	RLA			; ----FEDC  -  BA9876543210----
+	LD	B,A		; 
+	LD	A,(LOGUNIT)	; 
+	OR	B		; Or in logical unit number
+	LD	(HIGH$ADDR),A	; Save unit number & high byte
+	LD	A,H		; 
+	LD	(MED$ADDR),A	; Save middle byte
+	LD	A,(HSTSEC)	; Get sector number
+	OR	L		; Or in low byte
+	LD	(LOW$ADDR),A	; Save new low byte
+	RET
+
+;
+;  Select controller, and fall through to phase if selected ok.
+;
+BUSBSY	EQU	40H
+
+SELECT:	XOR	A
+	OUT	(NCRICR),A	; Clear initiator command register
+	OUT	(NCRTCR),A	; .  and target command register
+
+CLEAR$ARBIT:
+	XOR	A
+	OUT	(NCRMR),A	; .
+	IN	A,(NCRRPI)	; reset interrupts
+
+	LD	A,(MY$ID)	; Select target: get our ID,
+	LD	B,A		; .
+	LD	A,(TARGET)	; .  or in target ID
+	OR	B		; .
+	OUT	(NCRODR),A	; .  and send to NCR chip
+
+	IN	A,(NCRICR)
+	OR	01H		; Assert data bus
+	OUT	(NCRICR),A	; .
+
+	LD	A,05H		; Release BSY, keep SEL	
+	OUT	(NCRICR),A	; .  and assert data bus
+
+	LD	BC,6000H	; 250 ms loop (1M cycles)
+STIM:
+	IN	A,(NCRCSBS)	; Wait for BSY
+	AND	BUSBSY		; .
+	JP	NZ,SELECT$OK	; Got him!
+
+	DEC	C
+	JP	NZ,STIM		; inner loop:  41*256 = 10496 cycles
+	DEC	B
+	JP	NZ,STIM		; outer loop: 10510*96 = 1M cycles
+
+	XOR	A		; Select timeout -- clear bus
+	OUT	(NCRODR),A
+
+	DEC	A		; set timeout to 'a'
+	LD	(STATUS),A
+	JP	ALL$DONE	; and clear the registers
+
+SELECT$OK:
+	XOR	A		; Set good status
+
+ALL$DONE:
+	LD	B,A		; save status
+	LD	A,01H		; Release SEL
+	OUT	(NCRICR),A	; .
+	XOR	A		; Release data bus
+	OUT	(NCRICR),A	; .
+	LD	A,B		; get status back
+	OR	A		; Set status
+	RET	NZ
+	DEC	A		; clear scsi status to timeout, 0ffh
+	LD	(STATUS),A	; Save status for PWIDIR routine
+
+; SCSI.011
+; * * * * *  
+; *  --------\	NOTE: we fall through if we successfully
+; *  --------/	selected the controller!!
+; * * * * *
+
+	LD	A,00000110B	; Set DMA mode and Monitor Busy  
+	OUT	(NCRMR),A	; .
+
+S$RDY:
+; Wait for either a 5380 "Interrupt" or a REQ from Target.
+; The REQ is needed since it may have come too soon after
+; selection to register an Interrupt.
+	IN	A,(NCRBSR)	; Check for "Interrupt"
+	AND	00010000B	; .
+	JR	NZ,S$INT
+	IN	A,(NCRCSBS)	; Check for REQ
+	AND	NCRREQ		; .
+				; Wait for Interrupt or REQ
+	JR	Z,S$RDY
+	JP	S$PHASE		; Process phase vector
+
+S$INT:
+;  Determine cause of 5380 "Interrupt".  Either phase
+;  changed, busy dropped, or bus was reset.  If bits 2 and 3
+;  of the NCRBSR are not 0's when the Interrupt flag (bit 4)
+;  is set, then it is either a loss of BUSY or an SCSI RESET.
+	XOR	A
+	OUT	(NCRICR),A	; Release data bus
+	IN	A,(NCRBSR)	; Read 5380 Bus and Stat Reg
+	AND	00001100B	; Keep interesting bits
+	JR	NZ,S$EXIT
+				; Reset or Busy Loss: Exit
+				; 00 --> Process phase vector
+
+S$PHASE:
+; DMA mode and Monitor Busy must be cleared prior to clearing
+; of the 5380 Interrupt Flag.  Then mode register is restored.
+; Otherwise the interrupt flag may not clear and the DMA Mode 
+; may not be useable.  
+	XOR	A		; Clear 5380 Mode Register
+	OUT	(NCRMR),A	; .
+	IN	A,(NCRRPI)	; Reset interrupts
+	LD	A,00000110B	; Set DMA mode and Monitor Busy
+	OUT	(NCRMR),A	; .
+	IN	A,(NCRCSBS)	; Update phase...
+	AND	00011100B	; Mask all but phase bits, clear carry bit
+	RRA			; Rotate over for target
+	LD	E,A		; . (Save for use with jump table)
+	RRA			; .
+	OUT	(NCRTCR),A	; Set phase
+	LD	D,0		; E is already set (3 ins ago)
+	LD	HL,PHASE$TABLE	; Get phase jump table base
+	ADD	HL,DE		; Add offset for this phase
+	LD	A,(HL)		; Get phase pointer into HL
+	INC	HL		; .
+	LD	H,(HL)		; .
+	LD	L,A		; Pointer is now together
+	LD	D,01000000B	; DMA request mask(used by RSCSI and WSCSI)
+	JP	(HL)		; Go to it!
+
+PHASE$TABLE:
+	DEFW	PHASE0
+	DEFW	PHASE1
+	DEFW	PHASE2
+	DEFW	PHASE3
+	DEFW	PHASE4
+	DEFW	PHASE5
+	DEFW	PHASE6
+	DEFW	PHASE7
+
+PHASE0:				; Data out phase ...
+	LD	HL,S$IO$COUNT ; Point to byte/block transfer mode
+	LD	E,(HL)		; Get transfer mode value
+	LD	HL,(DATPTR)	; Use data pointer
+	JP	WSCSI		; Execute SCSI write routine
+
+PHASE1:				; Data in phase ...
+	LD	HL,S$IO$COUNT ; Point to byte/block transfer mode
+	LD	E,(HL)		; Get transfer mode value
+	LD	HL,(DATPTR)	; Use data pointer
+	JP	RSCSI		; Execute SCSI read routine
+
+PHASE2:				; Command out phase ...
+	LD	HL,(CMDPTR)	; Use command pointer
+	LD	E,1		; Set mode to byte transfer
+	JP	WSCSI		; Execute SCSI write routine
+
+PHASE3:				; Status in phase ...
+	LD	HL,STATUS	; Use status pointer
+	LD	E,1		; Set mode to byte transfer
+	JP	RSCSI		; Execute SCSI read routine
+
+PHASE7:				; Message in phase ...
+	LD	HL,MESSAGE	; Use message pointer
+	LD	E,1		; Set mode to byte transfer
+	JP	RSCSI		; Execute SCSI read routine
+
+; Currently unused phases
+
+PHASE4:
+PHASE5:
+PHASE6:
+S$EXIT:
+	XOR	A		; Clean up 5380 and exit.
+	OUT	(NCRTCR),A	; .
+	OUT	(NCRMR),A	; .
+	IN	A,(NCRRPI)	; Reset interrupts
+	RET			; .
+
+; Generalized SCSI write routine
+
+WSCSI:
+	di
+	LD	A,1		; Assert data bus
+	OUT	(NCRICR),A
+	LD	C,NCRDACK	; Set up destination port address
+	OUT	(NCRSDS),A	; Start DMA send
+
+; Wait for DMA request, keeping an eye on phase.  Note that the NCR
+; will not issue an ACK, nor will it generate DMA requests once the
+; phase changes, so it is best to treat DMA request checking as a
+; higher priority than phase change checking.
+
+WSCSI1:
+	IN	A,(NCRBSR)
+	LD	B,A		; Save status for use below
+	AND	D		; Check for DMA request
+	JR	Z,WSCSI2
+
+; This is the heart of the pseudo-DMA transfer.  On entry, HL points
+; to the data buffer and E should be 0 for 256 byte block transfer,
+; or 1 for byte-by-byte transfer.  NOTE: Use block transfer only if
+; you can be sure the controller can buffer 256 bytes of data and
+; can transfer at 5.25 us per byte.  Extra DACK's after the last REQ
+; will do no harm.
+;
+; OTIR register use: H = memory pointer, C = I/O port, B = counter
+; 
+	LD	B,E		; Set up loop count
+	OTIR
+	JP	WSCSI1		; Write more bytes until phase changes
+
+; This code skipped when data is being transferred ...
+WSCSI2:
+	LD	A,B		; Check 5380 "interrupt" flag
+	AND	00010000B	; .
+	JP	Z,WSCSI1	; Wait for DMA request,
+	ei
+	JP	S$INT	;  or process "interrupt"
+
+; Generalized SCSI read routine
+
+RSCSI:
+; Initiator command reg is already initialized
+
+	di
+	LD	C,NCRDACK	; Source port address
+	OUT	(NCRSDIR),A	; Write to this port starts dma recieve
+
+; Wait for DMA request, keeping an eye on phase.  Note: we must do
+; a check for DMA request before checking for a phase change, since
+; a byte may be queued up waiting to be DACKed prior to the phase
+; change.
+;
+RSCSI1:
+	IN	A,(NCRBSR)
+	LD	B,A		; Keep for phase change checking
+	AND	D		; Mask for DMA request
+	JR	Z,RSCSI2
+
+; This is the heart of the pseudo-DMA transfer.  On entry, HL points
+; to the data buffer and E should be 0 for 256 byte block transfer,
+; or 1 for byte-by-byte transfer.  NOTE: Use block transfer only if
+; you can be sure the controller can buffer 256 bytes of data and
+; can transfer at 5.25 us per byte.  Extra DACK's after the last REQ
+; will do no harm.
+;
+; INIR register use: H = memory pointer, C = I/O port, B = counter
+; 
+	LD	B,E		; Set up loop count
+	INIR
+	JP	RSCSI1		; Read more bytes until phase changes
+				; Be sure and check phase if no DMA
+				; request, since NCR won't issue any
+				; unneeded DACKs
+
+; This code skipped when data is being transferred ...
+RSCSI2:
+	LD	A,B		; Check 5380 "interrupt" flag
+	AND	00010000B	; .
+	JP	Z,RSCSI1	; Wait for DMA request,
+	ei
+	JP	S$INT		;  or process "interrupt"
+
+HDCODE	EQU	$		; End of hard disk code
+
+;	*	*	*	*	*	*	*	*
+;
+;	COLD BOOT ENTRY
+;
+;	NOTE: The following code does not stay resident. It is 
+;	overlayed for use by all bios system variables.
+;
+;	*	*	*	*	*	*	*	*
+BOOT:
+	DI
+	LD	A,41H		; Turn off EPROM, but leave drive 0
+	OUT	(CONT),A	; . selected (1770 turns it off)
+	LD	A,VECTORS/256	; set up interrupt vector
+	LD	I,A		; page address
+	IM	2
+	LD	A,(IOBYT)	; Initialize IOBYTE
+	LD	(IOBYTE),A
+	LD	SP,80H		; Initialize DART, CTC, etc.
+	CALL	IOINIT		; .
+	IN	A,(SIOCPA)
+	LD	(SioAstatus),A
+	IN	A,(SIOCPB)
+	LD	(SioBstatus),A
+	LD	A,10H		; reset ext/status interrupts
+	OUT	(SIOCPA),A	; on both channels
+	OUT	(SIOCPB),A
+;
+	IN	A,(029H)	; Get ID value
+	AND	07H		; Mask off extra bits
+	LD	B,A		; Bump to make 1 - 8
+	INC	B		; Convert to SCSI address
+	ADD	A,'0'		; . (Put ID in inital message)
+	LD	(S$ID$FOUND),A ; . .
+	XOR	A		; .  (Clear receiving register)
+	SCF			; .  (Carry = bit to rotate)
+NEXT$BIT:
+	RLA			; .  (Rotate left through carry)
+	DJNZ	NEXT$BIT	; .  (Not done -- repeat)
+	LD	(MY$ID),A	; Save ID value
+
+NOT7:
+	XOR	A		; Clear 5380 registers (SCSI init)
+	OUT	(NCRICR),A	; .
+	OUT	(NCRMR),A	; .
+	OUT	(NCRTCR),A	; .
+	OUT	(NCRSER),A	; .
+				; End of HD initialization
+
+	LD	HL,LOGMSG	; Display signon message
+	CALL	PUTS
+
+	LD	HL,DRIVE$TDATA	; Init drive type data
+	LD	DE,DRIVE$TYPES
+	LD	BC,8
+	LDIR
+
+; Init ZCPR3 stuff if present
+
+	LD	HL,LAST$SG	; Set up HL and DE to clear memory
+	LD	DE,LAST$SG+1	; from the end of boot to 0ffffh
+	LD	BC,0FFFFH-LAST$SG
+	LD	(HL),0
+	LDIR
+
+ZBOOT:	LD	BC,CMDSET$END-CMDSET
+	LD	HL,CMDSET	; Set up the ZCPR3 command line
+	LD	DE,Z3CL		; .  pointers
+	LDIR			; 
+
+	LD	BC,AUTCMD$END-AUTOCMD
+	LD	HL,AUTOCMD	; Move the automatic command to
+	LD	DE,Z3CL+3	; .  the ZCPR3 command line 
+	LDIR			; 
+
+	LD	BC,PATH$END-PATH; Move the initial path descriptor
+	LD	HL,PATH		; .  to the proper location
+	LD	DE,EXPATH	; 
+	LDIR			; 
+
+	LD	HL,Z3WHL	; Turn the wheel byte on
+	LD	(HL),0FFH	; 
+
+	LD	HL,ENV		; Move environment and TCAP to the
+	LD	DE,Z3ENV	; .  proper location
+	LD	BC,ENVEND-ENV+1	; .
+	LDIR			; 
+
+	XOR	A		; 
+	LD	(CDISK),A	; Indicate disk 0 selected
+	LD	(HSTACT),A	; Set host buffer inactive
+	LD	(UNACNT),A	; Clear unalloc count
+	LD	(HSTSID),A	; Assume side zero
+	JP	GOCPM		; Initialize & jump to CP/M
+
+LOGMSG:	DEFB	CR,LF,LF,BELL,ESC,'[#1w',CR
+	DEFB	MSIZE/10+'0',MSIZE % 10 +'0'
+	DEFB	'K ZCPR',Z3REV/10+'0','.',Z3REV % 10+'0'
+	DEFB	'/NOVAdos Z80 Operating System'
+	DEFB	CR,LF,'AMPRO BIOS Version ',VERS/10+'0','.'
+	DEFB	VERS % 10+'0'
+	DEFB	CR,LF,'Copyright (C) 1983,84,85,86 '
+	DEFB	'AMPRO Computers, Inc.'
+	DEFB	CR,LF,LF,'SCSI initiator ID = '
+S$ID$FOUND:
+	DEFB	'x'
+	DEFB	CR,LF,'(Arbitration Disabled)'
+	DEFB	CR,LF,'(NOVAdos Clock Interrupt Enabled)'
+	DEFB	CR,LF,'(Keyboard Input Interrupt Enabled)'
+	DEFB	CR,LF,'(Modem I/O Interrupts Enabled)'
+	DEFB	CR,LF,0
+ENV:
+	JP	BIOS		; FE00 Leading JMP
+ENV1:				; ZCPR3 enviornment descriptor ...
+	DEFB	'Z3ENV'		; FE03. Environment ID
+	DEFB	80h		; FE08 . extended environment
+	DEFW	EXPATH		; FE09 . External path (PATH)
+	DEFB	EXPATHS		; FE0B
+	DEFW	RCP		; FE0C . Resident command package (RCP)
+	DEFB	RCPS		; FE0E
+	DEFW	IOP		; FE0F . Input/output package (IOP)
+	DEFB	IOPS		; FE11 
+	DEFW	FCP		; FE12 . Flow command package (FCP)
+	DEFB	FCPS		; FE14
+	DEFW	Z3NDIR		; FE15 . Named directories (NDR)
+	DEFB	Z3NDIRS		; FE17
+	DEFW	Z3CL		; FE18 . Command line (CL)
+	DEFB	Z3CLS		; FE1A
+	DEFW	Z3ENV		; FE1B . Environment (ENV)
+	DEFB	Z3ENVS		; FE1D
+	DEFW	SHSTK		; FE1E . Shell stack (SH)
+	DEFB	SHSTKS		; FE20
+	DEFB	SHSIZE		; FE21
+	DEFW	Z3MSG		; FE22 . Message buffer (MSG)
+	DEFW	EXTFCB		; FE24 . External FCB (FCB)
+	DEFW	EXTSTK		; FE26 . External stack (STK)
+	DEFB	0		; FE28 . Quiet flag (1=quiet, 0=not quiet)
+	DEFW	Z3WHL		; FE29 . Wheel byte (WHL)
+	DEFB	4		; FE2B . Processor speed (Mhz)
+	DEFB	'E'-'@'		; FE2C . Max disk letter
+	DEFB	15		; FE2D . Max user number
+	DEFB	1		; FE2E . 1=ok to accept DU:, 0=not ok
+	DEFB	0		; FE2F . CRT selection
+	DEFB	0		; FE30 . Printer selection
+	DEFB	80		; FE31 . CRT 0: Width
+	DEFB	29		; FE32 	 # of lines
+	DEFB	27		; FE33 	 # of text lines
+	DEFW	001FH		; FE34 . Valid drive vector (A-E)
+	DEFB	0		; FE36 . spare
+	DEFB	80		; FE37 . PRT 0: Width
+	DEFB	66		; FE38 	 # of lines
+	DEFB	58		; FE39 	 # of text lines
+	DEFB	1		; FE3A 	 FF flag (1=can form feed)
+	DEFB	0		; FE3B . spare
+	DEFB	0		; FE3C . spare
+	DEFB	0		; FE3D . spare
+	DEFB	0		; FE3E . spare
+	DEFW	CCP		; FE3F . CCP address
+	DEFB	16		; FE41 . CCP size in records
+	DEFW	BDOS		; FE42 . BDOS address
+	DEFB	28		; FE44 . BDOS size in records
+	DEFW	BIOS		; FE45 . BIOS address
+	DEFB	'SH      '	; FE47 . Shell variable filename
+	DEFB	'VAR'		;      . Shell variable filetype
+	DEFB	'        '	; FE52 . File 1
+	DEFB	'   '		; 
+	DEFB	'        '	; FE5D . File 2
+	DEFB	'   '		; 
+	DEFB	'        '	; FE68 . File 3
+	DEFB	'   '		; 
+	DEFB	'        '	; FE73 . File 4
+	DEFB	'   '		; 
+	DEFB	0		; FE7E Public drive area (ZRDOS +)
+	DEFB	15		; FE7F Public user area (ZRDOS +)
+				; ENV 128 bytes long
+
+ENV2:		;1234567890123		; Terminal capabilities data
+	DB	'DEC-VT100    '		;Name of Terminal
+	DB	ENV2$G-ENV2		; graphics offset
+	DB	80H			; config byte B14
+	DB	10H			; config byte B15
+	DB	'E'-'@'			;Cursor UP (Wordstar Defaults)
+	DB	'X'-'@'			;Cursor DOWN
+	DB	'D'-'@'			;Cursor RIGHT
+	DB	'S'-'@'			;Cursor LEFT
+	DB	50			;CL Delay
+	DB	5			;CM Delay
+	DB	3			;CE Delay
+	DB	1bh,'[2J',0		;CL String
+	DB	1bh,'[%i%d;%dH',0	;CM String
+	DB	1bh,'[K',0		;CE String
+	DB	1bh,'[1m',0		;SO String
+	DB	1bh,'[m',0		;SE String
+	DB	0			;TI String
+	DB	0			;TE String
+	DB	1bh,'[M',0		;DL line delete
+	DB	1bh,'[L',0		;IL line insert
+	DB	1bh,'[J',0		;CD clear to end of screen
+	DB	1bh,'[%+0m',0
+	DB	'0574',0
+	DB	1bh,'[6n',0		;read current cursor position
+	DB	0			;read line until cursor
+ENV2$G:	DB	0			;GO graphics on/off delay
+	DB	0eh,0			;GS graphics on
+	DB	0fh,0			;GE graphics off
+	DB	1bh,'[?25l',0		;CDO cursor off
+	DB	1bh,'[?25h',0		;CDE cursor on
+	DB	0DAH			; GULC upper left corner
+	DB	0BFH			; GURC upper right corner
+	DB	0C0H			; GLLC lower left corner
+	DB	0D9H			; GLrC lower right corner
+	DB	0C4H			; GHL horizontal line
+	DB	0B3H			; GVL vertical line
+	DB	0DBH			; GFB full block
+	DB	0B1H			; GHB hashed block
+	DB	0C2H			; GUI upper intersection
+	DB	0C1H			; GLI lower intersection
+	DB	0C5H			; GIS intersection
+	DB	0B4H			; GRTI right intersection
+	DB	0C3H			; GLTI left intersection
+	DB	0			;
+ENVEND:
+
+; End of environment and TCAP descriptors
+
+CMDSET:	DEFW	Z3CL+4		; Point to first chr in cmd line buf
+	DEFB	Z3CLS		; Command line buffer size
+CMDSET$END	EQU	$
+
+PATH:				; Initial path description
+	DEFB	'$$'		; .  Current drive, current user 
+	DEFB	1,15		; .  Drive A:, user 15
+	DEFB	0		; (end of path)
+PATH$END	EQU	$
+
+DRIVE$TDATA:
+				; Drive type data
+	DEFB	01H,02H,04H,08H
+	DEFB	02H,00H,00H,00H
+
+LAST$SG EQU	$
+
+	ORG	BOOT
+
+UNINIT	EQU	$
+MUNACT:	ds	1		; UNALLOCATED COUNT VALUE
+SEKDSK:	ds	1		; SEEK DISK NUMBER
+SEKTRK:	ds	2		; SEEK TRACK NUMBER
+SEKSEC:	ds	1		; SEEK SECTOR NUMBER
+
+HSTDSK:	ds	1		; HOST DISK NUMBER
+HSTTRK:	ds	2		; HOST TRACK NUMBER
+HSTSEC:	ds	1		; HOST SECTOR NUMBER
+
+CPMDSK:	ds	1		; SINGLE DENSITY	DSK PARM
+CPMTRK:	ds	2		; AND TRK
+CPMSEC:	ds	1		; AND SECTOR
+
+SEKHST:	ds	1		; SEEK SHR SECSHF
+HSTACT:	ds	1		; HOST ACTIVE FLAG
+HSTWRT:	ds	1		; HOST WRITTEN FLAG
+
+UNACNT:	ds	1		; UNALLOC REC CNT
+UNADSK:	ds	1		; LAST UNALLOC DISK
+UNATRK:	ds	2		; LAST UNALLOC TRACK
+UNASEC:	ds	1		; LAST UNALLOC SECTOR
+
+CPMSPT:	ds	1		; LOGICAL SECTORS PER TRACK
+SECMSK:	ds	1		; SECTOR MASK
+SECSHF:	ds	1		; SECTOR SHIFT
+
+INT$RETRIES:
+	ds	1		; Internal retry counter for RD & WR
+ERFLAG:	ds	1		; ERROR REPORTING
+RSFLAG:	ds	1		; READ SECTOR FLAG
+READOP:	ds	1		; 1 IF READ OPERATION
+WRTYPE:	ds	1		; WRITE OPERATION TYPE
+DMAADR:	ds	2		; LAST DMA ADDRESS
+HSTBUF:	ds	1024		; HOST BUFFER
+STATUS:	ds	1
+MESSAGE:ds	1
+CMDPTR:	ds	2
+DATPTR:	ds	2
+LOGDSK:	ds	1
+PHYDRV:	ds	1
+DPHDRV:	ds	1
+PHYTAG:	ds	2
+PHYCMD:	ds	1
+TAGDRV:	ds	1
+TAGPHY:	ds	1
+TAGTYP:	ds	1
+TAGCTL:	ds	1
+S$IO$COUNT:
+	ds	1
+S$STAT$DAT:
+	ds	4
+TARGET:	ds	1
+LOGUNIT:ds	1
+CURDPB:	ds	2
+
+;	AMPRO BIOS-SPECIFIC STORAGE
+
+IDSAVE:	ds	6		; READ ADDRESS BUFFER AREA
+LTRACK:	ds	5		; LAST FLOPPY TRACK ACCESSED
+LDISK:	ds	1		; LAST DISK SELECTED
+TRIES:	ds	1		; NUMBER OF TIMES TO DO IT
+RWHOST:	ds	1		; LOCAL READ/WRITE FLAG
+HSTSID:	ds	1		; HOST DISK SIDE SELECT MASK
+TIMEOUT:ds	1		; TIMEOUT LOOP COUNTER
+SECTOR:	ds	1		; TEMPORARY STORAGE
+
+CHGDSK:	ds	1		; Flag to tell if we changed drives
+FRWCMD:	ds	1		; FDC command
+FRWPTR:	ds	2		; FDC data pointer
+SAVE$CMDPTR:
+	ds	2		; SCSI command pointer save area
+SAVE$DATPTR:
+	ds	2		; SCSI data pointer save area
+
+;	SPECIAL E DISK PARAMETERS - FILLED IN WHEN E DISK IS
+;	FIRST SELECTED, AND USED IN DEBLOCKING.
+
+ESECADJ:ds	1		; SECTOR NUMBER ADJUST FOR SIDE 1
+
+KEYBUF:	ds	KEYSIZE		; allocate buffer space for 64 chars
+KEYSTOP EQU	($ & 255)	; end of buffer address
+
+MdmObuf:
+	ds	MdmOsize	; space for 200 characters to modem
+MdmOstop	equ	($ & 255)
+;
+MdmIbuf:
+	ds	MdmIsize	; space for 200 characters from modem
+MdmIstop	equ	($ & 255)
+;
+DIRBUF:	ds	128		; DIRECTORY ACCESS BUFFER
+
+;	*	*	*	*	*	*	*	*
+;
+;  Floppy drive directory check vector storage
+;
+;  The length of these vectors allows the use of up to 256
+;  directory entries, all of which are checked by BDOS.
+;
+;  Note that these are used for removable floppy media only.
+;
+;  Do not change QPARM to increase the number of directory
+;  entries without adjusting the variable FD$CKS.
+;
+;	*	*	*	*	*	*	*	*
+QD$CKS	EQU	(255/4)+1	; maximum of 256 directory entries 
+DS$CKS	EQU	(127/4)+1	; maximum of 128 directory entries
+
+CSVA:	ds	QD$CKS
+CSVB:	ds	DS$CKS
+CSVC:	;	ds	FD$CKS
+CSVD:	;	ds	FD$CKS
+CSVE:	ds	QD$CKS
+
+;	*	*	*	*	*	*	*	*
+;
+;  Floppy drive allocation vector storage
+;
+;  This area is used by BDOS to map all CP/M blocks for the
+;  target disk drive, and is maintained to indicate which blocks
+;  on the disk are in use.
+;
+;  The length of the Floppy area is set to 50 Bytes, which is
+;  enough to handle a 96 TPI DS/DD disk as described in QPARM.
+;
+;  Do not change QPARM to increase storage without adjusting
+;  the variable FD$ALV.
+;
+;	*	*	*	*	*	*	*	*
+QD$ALV	EQU	(394/8)+1	; maximum of 395 disk blocks
+DS$ALV	EQU	(194/8)+1	; maximum of 195 disk blocks
+
+ALVA:	ds	QD$ALV		; A: is an 80 tracker, needs max
+ALVB:	ds	QD$ALV		; B: is an 80 tracker, needs max
+ALVC:	;	ds	SS$ALV
+ALVD:	;	ds	SS$ALV
+ALVE:	ds	QD$ALV
+
+FDATAEND EQU	$
+HD$VECTORS EQU	$		; HD check & allocation vectors 
+
+;	*	*	*	*	*	*	*	*
+;
+;  Hard disk directory check vector storage
+;
+;	No Check storage is required - just an address
+;
+;	*	*	*	*	*	*	*	*
+CSVF:	ds	0
+CSVG:	ds	0
+CSVH:	ds	0
+CSVI:	ds	0
+CSVJ:	ds	0
+CSVK:	ds	0
+CSVL:	ds	0
+CSVM:	ds	0
+CSVN:	ds	0
+CSVO:	ds	0
+CSVP:	ds	0
+;	*	*	*	*	*	*	*	*
+;
+;  Hard disk allocation vector storage
+;
+;	*	*	*	*	*	*	*	*
+HD$ALV	EQU	(1279/8)+1	; Maximum 1280 disk blocks
+ALVF:	ds	0
+ALVG:	ds	0
+ALVH:	ds	0
+ALVI:	ds	0
+ALVJ:	ds	0
+ALVK:	ds	0
+ALVL:	ds	0
+ALVM:	ds	0
+ALVN:	ds	0
+ALVO:	ds	0
+ALVP:	ds	0
+
+HD$CURRENT EQU	$		; Current Bios Buffer Area ptr
+
+ENDDATA EQU	$
+				; Mark the last avail. byte
+RESERVE EQU	Z3BASE-2*256-36	; 0F900H is ZCPR3 base, minus 256 bytes for
+				; each 8M hard drive, and 36 bytes for
+				; external NovaDOS stack at ZCPR3 base
+
+FDCSIZE EQU	(MAINEND-BIOS) + (LAST$SG-HDCODE)
+FDDSIZE EQU	FDATAEND-LAST$SG
+
+HDCSIZE EQU	HDCODE-MAINEND
+HDDSIZE EQU	ENDDATA-FDATAEND
+
+;	*	*	*	*	*	*	*	*
+;
+;  Show the available free space and the number of sectors needed
+;  to hold a SYSGEN image of CP/M with this BIOS:
+;
+;	*	*	*	*	*	*	*	*
+FREEMEM EQU	RESERVE-ENDDATA	; Free memory left
+
+SGSIZE	EQU	(LAST$SG-CCP+127)/128 ; Sysgen size
+				; Number of sectors -- Must be 50H or less!
+
+	END			; BIOS

@@ -1,0 +1,297 @@
+	.z80
+;
+;	MOUNT - a utilty to allow use of a large hard drive without giving
+;	up too much of your precious TPA.
+;
+;	Here's an example of when MOUNT can come in useful. I have a 18Meg
+;	drive, with 2 8Meg drives (A & B) defined. I move up to a 40Meg drive,
+;	and would love to someone use the other 24Meg I now have, but am loath
+;	to lose a couple of K of the top of my TPA. So drive B becomes a
+;	pseudo-removable hard drive, or mountable volume. I still only ever
+;	have 16Meg available simultaneous, but can quickly swap the 8Meg of
+;	the B drive over a 32Meg range, with no loss in TPA space.
+;
+;	Syntax:
+;		MOUNT [vol#] | //
+;
+;	where vol# is a number between 0 and vols-1 (vols is defined below
+;	in the patch area). Calling MOUNT with no parameters will report on
+;	the current mounted volume.
+;
+;	MOUNT also looks for an MP/M style directory label (20H in the user
+;	area byte), and will display the 11 characters in the filename if
+;       found.
+;
+;	This program knows about NOVAdos' fast boot scheme, and turns it off
+;	momentarily if it is enabled, in order to force a re-build of the
+;	newly mounted drive's allocation vector.
+;
+;	A patch area from 10B-135 is available to customize the program to
+;	your particular drive characteristics.
+;
+;	Revision History (stacked backwards)
+;	================
+;	1.0	09/28/89	W. Hortensius - initial release
+;
+.request	syslib				; request Z3 system library
+;
+	extrn	EPRINT,COUT,CRLF
+	extrn	PUTUD,LOGUD,GETUD
+	extrn	EVAL10,COMPHD,PAFDC
+	extrn	INITFCB
+;
+; -- command line stuff
+ArgLength	equ	080H		; # chars in command line
+Args		equ	ArgLength+1	; start of command line
+;
+; -- BDOS calls stuff
+BDOS		equ	0005H
+ResetAll	equ	13		; reset all drives
+Search1st	equ	17		; search for first occurence of file
+SearchNext	equ	18		; search for next occurence of file
+GetDiskParm	equ	31		; get address of DPB
+SetFlags	equ	41		; get/set NOVAdos flags
+;
+DPBresTrks	equ	13		; offset in DPB to # of reserved tracks
+;
+; -- NOVAdos stuff
+FastLogBit	equ	5		; NOVAdos fast disk log bit
+;
+; -- general constants
+bel		equ	07h
+tab		equ	09h
+lf		equ	0Ah
+cr		equ	0Dh
+;
+	cseg
+	db	'Z3ENV'
+	db	1
+	dw	0
+;
+;**********************
+;* P A T C H  A R E A *
+;**********************
+;
+drive:		db	'B'		; 10B mountable drive A-P
+vols:		db	8		; 10C # of mountable volumes
+size:		dw	0400H		; 10D size of each mountable volume (in tracks)
+inioff:		dw	0402H		; 10F start of mountable volume area (in tracks)
+NOVAdos:	db	1		; 111 1 if using NOVAdos or other
+					;     BDOS replacement that supports
+					;     fast disk relogging, and changing
+					;     it's status via BDOS call 41, 0
+					;     otherwise
+LabelFCB:	db	'?' 		; 112 search pattern for directory
+	 	db	'????????'	; 113 label (user id 20h)
+		db	'???'		; 11B
+		ds	24		; 11E
+;
+start:	ld	(OldStack),sp
+	ld	sp,LocalStack
+	call	EPRINT
+	defb	'MOUNT - Version 1.0',cr,lf,0
+	call	PUTUD			; save current drive/user
+	ld	hl,ArgLength		; check command line 
+	ld	a,(hl)
+	or	a
+	jr	z,ShowVolume		; no args, just show current volume
+	ld	b,a			; save command length
+	inc	hl			; point to command line itself
+ArgLoop:
+	ld	a,(hl)			; get command char
+	cp	' '			; skip white space
+	jr	nz,GotArg
+	inc	hl
+	djnz	ArgLoop			; loop until end of command or arg found
+;
+; Found an argument on the command line. It is a help request, a valid
+; mount request, or gibberish?
+;
+GotArg:	cp	'/'			; asking for help?
+	jp	z,ShowHelp
+	call	EVAL10			; evaluate volume #
+	ld	a,(vols)
+	cp	e			; vol # too large,
+	jp	c,ShowHelp		; show usage
+	ld	a,e
+	or	a
+	jp	z,ShowHelp		; zero volume is a no-no!
+	ld	(ReqVol),a		; save required volume
+;
+; MountVolume: argument has been decoded, and is a valid volume number.
+; Select the mountable disk, and ask the BDOS for the pointer to it's DPB,
+; so that we can alter the number of reserved tracks.
+;
+MountVolume:
+	ld	hl,(inioff)		; retrieve track offset of volume 0
+	ld	de,(size)		; retrieve size in tracks of each vol
+	ld	a,(ReqVol)		; retrieve requested volume
+	dec	a
+	jr	z,Mount2		; if 1st volume, we're ready
+	ld	b,a
+Mount1:	add	hl,de			; calculate track offset of requested
+	djnz	Mount1			; volume
+
+Mount2:	push	hl			; save track offset of selected volume
+	call	GetMount		; point HL to track offset
+	pop	de			; restore volume track offset
+	ld	(hl),e
+	inc	hl
+	ld	(hl),d			; point DPB to our volume
+
+	ld	a,(NOVAdos)		; using NOVAdos?
+	or	a
+	jr	z,Mount3
+;
+; Turn off NOVAdos' fast disk relog to make sure that the directory of
+; the newly mounted volume is checked, the the allocation vector is rebuilt.
+;
+	ld	e,0			; examine current flag settings
+	ld	c,SetFlags
+	call	BDOS
+	bit	FastLogBit,a		; isolate fast log bit
+	push	af
+	ld	c,SetFlags
+	ld	e,080H+(1 SHL FastLogBit)	; say turn bit on
+	call	z,BDOS			; go to slow if fast boot was turned on
+
+Mount3:	ld	c,ResetAll		; reset all drives
+	call	BDOS
+	
+	ld	a,(NOVAdos)		; using NOVAdos?
+	or	a
+	jr	z,Mount4
+	pop	af			; retrieve fast log setting
+	call	z,GetMount		; mount the drive before turning on
+					; fast relog...
+	ld	c,SetFlags
+	ld	e,1 SHL FastLogBit
+	call	z,BDOS			; turn back on if it was off at the start
+Mount4:
+; -- fall thru to show volume
+;
+; ShowVolume: display mounted volume number,
+; and display an MP/M style directory label on volume
+; (if there is one)
+;
+ShowVolume:
+	call	GetMount
+	ld	e,(hl)
+	inc	hl
+	ld	d,(hl)			; retrieve current # of reserved tracks
+	push	de
+	ld	hl,(inioff)		; retrieve track offset of volume 0
+	ld	a,(vols)		; retrieve requested volume
+	ld	b,a
+	ld	c,1
+Show1:	pop	de
+	call	COMPHD			; matched track offsets?
+	jr	z,Show2			; yes, found mounted volume
+	push	de
+	ld	de,(size)		; retrieve size in tracks of each vol
+	add	hl,de			; calculate next volume's track offset
+	inc	c			; bump mounted volume #
+	djnz	Show1
+	call	EPRINT
+	defb	bel,'WARNING: unknown volume mounted (odd track offset)!',0
+	jp	exit
+
+Show2:	call	EPRINT			; display which volume # mounted,
+	defb	'Volume ',0		; along with maximum volume #
+	ld	a,c
+	call	PAFDC
+	call	EPRINT
+	defb	' of ',0
+	ld	a,(vols)
+	call	PAFDC
+	call	EPRINT
+	defb	' mounted',cr,lf,0
+;
+; look for MP/M style directory label, and display the contents of the
+; file name if found
+;
+	ld	de,LabelFCB
+	call	INITFCB			; clear out relevant FCB fields
+	ld	a,'?'			; check all users
+	ld	(de),a
+	ld	c,Search1st
+Show3:	call	BDOS
+	bit	7,a
+	jr	nz,ShowEnd		; no directory label
+	add	a,a			; offset to start of this entry
+	add	a,a			; (entry * 32)
+	add	a,a
+	add	a,a
+	add	a,a
+	ld	e,a
+	ld	d,0
+	ld	hl,ArgLength
+	add	hl,de
+	ld	a,(hl)			; get user code from buffer
+	cp	20h			; MP/M style directory label?
+	jr	z,GotLabel
+	ld	de,LabelFCB
+	ld	c,SearchNext
+	jr	Show3
+GotLabel:				; found a label, now show it
+	call	EPRINT
+	defb	'Volume label is ',0
+	ld	b,11			; length of filename
+	inc	hl
+Label1:	ld	a,(hl)
+	call	COUT			; output filename
+	inc	hl
+	djnz	Label1
+	call	CRLF
+ShowEnd:
+	jr	exit
+;
+; ShowHelp: display syntax of command, and brief description
+;
+ShowHelp:
+	call	EPRINT
+	defb	'  Syntax:  MOUNT [vol#] | [//]',cr,lf
+	defb	tab,'vol# = 1 to ',0
+	ld	a,(vols)
+	call	PAFDC
+	call	EPRINT
+	defb	cr,lf
+	defb	tab,'calling with no argument shows '
+	defb	'mounted volume info',cr,lf,0
+;
+; Exit: restore original drive/user and exit
+;
+exit:
+	call	GETUD			; restore default drive/user
+	ld	sp,(OldStack)
+	ret
+;
+; GetMount: point HL to location of # of reserved tracks
+; for our mountable drive
+;
+GetMount:
+	push	af
+	push	bc
+	push	de
+	ld	a,(drive)		; get mountable drive
+	sub	'A'			; convert to binary offset
+	ld	b,a
+	ld	c,0 			; ask for user 0
+	call	LOGUD			; select mountable drive, user 0
+	ld	c,GetDiskParm		; get address of DPB in HL
+	call	BDOS
+	ld	de,DPBresTrks		; offset in DPB to # of reserved tracks
+	add	hl,de
+	pop	de
+	pop	bc
+	pop	af
+	ret
+;
+; Data area
+;
+OldStack:	dw	0		; CCP stack pointer
+		ds	64		; Local stack
+LocalStack:
+ReqVol:		db	0		; requested volume #
+	
+	end	start

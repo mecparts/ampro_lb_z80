@@ -1,0 +1,1071 @@
+; 02 Nov 88.. swh 
+;         * * * * * * * * * * * * * * * * * * * * * * * *
+;         *                                             *
+;         *       SCSI/Floppy/Hard Disk Boot ROM        *
+;         *                                             *
+;         * Copyright (C) 1983, 1984, 1985, 1986, 1988  *
+;         *            AMPRO Computers, Inc.            *
+;         *             All rights reserved.            *
+;         *                                             *
+;         * * * * * * * * * * * * * * * * * * * * * * * *
+;
+;
+;  Revision history:
+;
+;  Ver  Date      Who     Description
+;  ---  --------  ---     -----------------------------------------
+;  1.4  08/05/21  swh     Modified board to connect EPROM enable to
+;			  FDC reset line. That way, I can turn off
+;			  the floppy drive motors when booting from
+;			  a SCSI drive.
+;
+;  1.3  11/02/88  swh     Changed scsi routines to current bios 3.8
+;			  routines to fix problems with SETPRAM call.
+;			  WSCSI was overwriting contents of DATPTR
+;			  every time it was called, creating havoc
+;			  when it came time to send the drive parms
+;			  to the controller.
+;
+;  1.2  03/27/86  fsw     Changed scsi select routine to current bios
+;                         3.6 routines. Added SCSI retries. Fixed 
+;			  arbitration to provide exit if scsi reset 
+;			  occurs during arbitration time.
+;
+;  1.1  10/18/85  fsw     Corrected problem booting from 96 tpi disk.
+;			  Added 5 tries for floppy disk reads and
+;			  jmp for drive prameters initialization.
+;
+;  1.0   9/17/85  fsw	  Initial release.
+;
+;
+;
+;                            DESCRIPTION
+;
+; This ROM will boot from floppy, hard disk, or SCSI disk server,
+; and is based on the orginal AMPRO boot ROM and the SCSI routines
+; in Version 3 BIOS.  Arbration is used in the SCSI routines.
+;
+; No alteration to boot sector is required to boot from floppy.
+; Booting from hard disk requires the use of the HGEN utility, to
+; install a sector on the hard disk containing hard disk system
+; configuration info, and to add code to the boot loader for hard
+; disk configuration initialization.
+;
+; 			 THEORY OF OPERATION   
+;
+; The ROM on reset begins execution at 0000H.  It first relocates
+; itself to 8000H then continues executation above 8000H.  
+; The ROM then loads in a "boot loader" sector from floppy, hard disk,
+; or other SCSI device.  
+;
+; The first attempt is to load a boot loader from side 0, track 0 
+; sector one of floppy drive "A" (drive select "1"), if a floppy
+; is present in that drive.  If the first byte of that sector is not
+; an LXI H or MVI A op code, then an attempt to load a boot loader
+; from an SCSI device is made.  SCSI ID 0 is used as the SCSI boot
+; device if the board's ID is jumpered as 7.  Otherwise, SCSI ID 7
+; is used for the attempt to boot from SCSI.  
+;
+; If the appropriate SCSI device is not able to 
+; provide a legal boot loader (with LXI H or MVI A op code as first
+; byte), then the process begins again, looping until a legal "boot
+; loader" is obtained.  
+;
+; The boot loader is stored at 9000H, followed by a jump to that
+; address.  The contents of the boot loader determine what happens
+; next.  Normally the ROM is switched off first thing.
+;
+; This accommodates:
+;
+;       o  Hard disk drive spinup
+;       o  User choice of boot device
+;       o  Networking
+;       o  Odd-ball applications!
+;
+;
+; 				MISC NOTES
+;
+; Supports floppy drive step rate of 6 msec only for compatability
+; with the 1770 or 1772 fdc. 
+;
+; Supports hard disk with 512 byte sectors only.  Each call to read
+; track reads one AMPRO track of 16 sectors when booting from hard
+; disk.
+;
+; Requires the use of SCSI self-initializing controllers, such as
+; Adaptec ACB-4000, Shugart 1610-4, Xebec OWL drive/controller, etc.
+;
+;                                FEATURES
+;
+; 	Test for presence of 177x floppy disk controller and
+; 	for 5380 SCSI controller. 
+;
+;	Test for presence of boot sector on the disk it has read. 
+;
+;	Test for properly formated floppy disk in drive.
+;
+;	If unable to boot from floppy disk will try SCSI, if
+;	unable to boot from SCSI, starts over. This sequence 
+;	will repeat untill sucessful.
+;
+;
+;                           SCSI ID CONVENTIONS
+;
+; SCSI Master mode:  Set board SCSI ID to 7 (refer to board manual).
+;       When the board's SCSI ID is 7, the boot ROM issues an SCSI
+;       bus reset, and then uses the device at SCSI ID 0 as the
+;	SCSI boot device, if floppy boot attempt fails.
+;
+; SCSI Slave mode:  Set board SCSI ID to anything other than 7.
+;	When the board's SCSI ID is not 7, the boot ROM does not
+;	issue an SCSI bus reset.  In this case the device at SCSI
+;	ID 7 is used as the SCSI boot device if the floppy boot 
+;	attempt fails.  This might be a disk server rather than
+;	a disk controller.
+;
+; In all cases if will boot from floppy in drive "A" if a legal boot
+;	sector is present (as defined above)
+;********************************************************************
+;
+YES	EQU	1
+NO	EQU	0
+
+MSEC	EQU	167
+CR	EQU	0DH
+LF	EQU	0AH
+CONT	EQU	0		; system control port
+SID1	EQU	10H		; select side one of disk
+SDEN	EQU	20H		; select single density
+ROMOFF	EQU	40H		; turn rom off
+
+BOOT	EQU	8000H		; origin of this program
+RAM	EQU	9000H		; beginning of scratch ram
+STACK	EQU	RAM		; stack pointer
+
+CTCA	EQU	40H		; counter/timer
+CTCA0	EQU	CTCA
+CTCA1	EQU	CTCA+10H
+CTCA2	EQU	CTCA+20H
+CTCA3	EQU	CTCA+30H
+
+SIO	EQU	80H		; serial io
+SIOAD	EQU	SIO
+SIOBD	EQU	SIO+8
+SIOAC	EQU	SIO+4
+SIOBC	EQU	SIO+12
+
+CMND	EQU	0C0H
+WTRK	EQU	CMND+1
+WSEC	EQU	CMND+2
+WDAT	EQU	CMND+3
+
+STAT	EQU	CMND+4
+RTRK	EQU	CMND+5
+RSEC	EQU	CMND+6
+RDAT	EQU	CMND+7
+
+REST	EQU	08H
+STEPI	EQU	58H
+RDSEC	EQU	88H
+RDID	EQU	0C8H
+FI	EQU	0D0H
+
+ERMSK	EQU	18H
+
+ID	EQU	29H		; Little board SCSI id
+;
+;  NCR 5380 controller equates
+;
+NCRBASE EQU	20H		; Base address of NCR 5380
+NCRCSD	EQU	NCRBASE+0	; (R)  Current SCSI data register
+NCRODR	EQU	NCRBASE+0	; (W)  Output data register
+NCRICR	EQU	NCRBASE+1	; (RW) Initiator command register
+NCRMR	EQU	NCRBASE+2	; (RW) Mode register
+NCRTCR	EQU	NCRBASE+3	; (RW) Target command register
+NCRCSBS EQU	NCRBASE+4	; (R)  Current SCSI bus status
+NCRSER	EQU	NCRBASE+4	; (W)  Select enable register
+NCRBSR	EQU	NCRBASE+5	; (R)  Bus & status register
+NCRSDS	EQU	NCRBASE+5	; (W)  Start DMA send
+NCRIDR	EQU	NCRBASE+6	; (R)  Input data register
+NCRSDTR EQU	NCRBASE+6	; (W)  Start DMA target receive
+NCRRPI	EQU	NCRBASE+7	; (R)  Reset parity/interrupt
+NCRSDIR EQU	NCRBASE+7	; (W)  Start DMA initiator receive
+NCRDACK EQU	NCRBASE+8	; (RW) DACK pseudo-DMA register
+
+; Current SCSI bus status (NCRCSBS)
+
+NCRRST	EQU	10000000B	; Reset
+NCRBSY	EQU	01000000B	; Busy
+NCRREQ	EQU	00100000B	; Request
+NCRMSG	EQU	00010000B	; Message
+NCRCD	EQU	00001000B	; Control/Data
+NCRIO	EQU	00000100B	; Input/Output
+NCRSEL	EQU	00000010B	; Select
+NCRDBP	EQU	00000001B	; Data bus parity
+;...............................................................
+
+	ORG	BOOT
+
+	JP	START -BOOT	; power on or re-boot
+	JP	SETUP		; setup disk drive
+	JP	STEPIN		; step in one track
+	JP	SIDEONE		; select side one
+	JP	FDCLR		; clear the fdc
+	JP	SETDMA		; set new dmaadr (hl)
+	JP	READTRK		; read current track at dmaadr
+	JP	READSEC		; read current sector at dmaadr
+	JP	READID		; read next sector address
+	JP	SETPRAM		; pass the hard disk prameters to the
+				; scsi controller, for dumb controllers.
+
+DMAADR:	DEFW	0
+IDSV:	DEFW	0,0,0
+SELBYT:	DEFB	0
+TRACK:	DEFB	0
+SECTOR:	DEFB	0
+STATUS:	DEFB	0
+TWOSID:	DEFB	0
+SBIAS:	DEFB	0
+
+START:	DI
+	XOR	A		; clear system control register
+	OUT	(CONT),A	; and reset FDC
+	LD	HL,0
+	LD	DE,BOOT
+RELOC:	LD	A,(HL)
+	LD	(DE),A
+	INC	HL
+	INC	DE
+	LD	A,H
+	CP	16		; relocate 16 pages
+	JP	NZ,RELOC -BOOT	; this code runs at address 0
+	JP	INITSYS		; this code runs relative to boot
+
+; copyright declaration
+
+	DEFB	'SCSI Boot Rom Version 1.4 - (C) 1983,1984,1985,1986,1988 '
+	DEFB	'- AMPRO Computers, Inc. - All rights reserved. '
+
+INITSYS:LD	SP,STACK	; set local stack
+	LD	A,ROMOFF	; now that we're in RAM @ 8000, we can
+	OUT	(CONT),A	; turn off the EPROM and bring the FDC
+				; out of reset
+	LD	HL,CTCTBL
+CTCINT:	LD	A,(HL)
+	INC	A
+	JP	Z,SIOINT
+	DEC	A
+	OUT	(CTCA0),A
+	OUT	(CTCA1),A
+	INC	HL
+	JP	CTCINT
+
+CTCTBL:	DEFB	47H,13,255	; 9600
+;CTCTBL:	DB	3,0,255			;19200
+
+SIOTBL:	DEFB	4,46H		; x16 clock, 1 stop bit, parity disable
+	DEFB	5,0EAH		; DTR, 8 bits, no break, Tx enable, RTS
+	DEFB	3,0C1H		; Rx 8 bits, no auto enables, Rx enable
+	DEFB	255		; 9600
+;SIOTBL:	DB	4,84H,5,06AH,3,0C1H,255		;19200
+
+SIOINT:	LD	HL,SIOTBL
+SIOLP:	LD	A,(HL)
+	INC	A
+	JP	Z,CBOOT
+	DEC	A
+	OUT	(SIOAC),A
+	OUT	(SIOBC),A
+	INC	HL
+	JP	SIOLP
+;				; fall thru to CBOOT
+				
+; cboot is the start of the read disk routines. 
+;
+; check little board id, if id = 7 do SCSI reset, if id not=7 
+; no reset is issued.
+;
+; a 1 second time delay is invoked prior to SCSI reset to allow
+; various SCSI devices do their powerup initialization before
+; the SCSI reset is issued.
+;
+CBOOT:	IN	A,(ID)		; get little board SCSI id
+	AND	07H		; mask off
+	INC	A		; make 1 thru 8
+	LD	B,A		; set 'b' for count
+	XOR	A
+	SCF			; set carry
+SETID:	RLA
+	DEC	B
+	JP	NZ,SETID
+	LD	(MYID),A
+	CP	80H		; scsi id 7
+	LD	A,10000000B	; target id=7
+	JP	NZ,RESETNOT
+	LD	A,4		; 4 x .25 sec
+	CALL	TIMER
+	LD	A,80H		; scsi reset
+	OUT	(NCRICR),A	; set reset line high
+HOLDIT:	DEC	A
+	JP	NZ,HOLDIT	; 50 usec min
+	OUT	(NCRICR),A	; clear reset line
+	IN	A,(NCRRPI)	; and the interrupt line
+	LD	A,00000001B	; target id=0
+;
+; has target id in 'a'. if little board id=7 boot from device 0.
+; if little board id not=7, boot from device 7.
+;
+RESETNOT:
+	LD	(TARGET),A	; device to boot from
+	XOR	A
+	OUT	(NCRICR),A	; clear the 5380 registers
+	OUT	(NCRMR),A
+	OUT	(NCRTCR),A
+	OUT	(NCRSER),A
+	IN	A,(NCRMR)	; read the mode register
+				; mode register should equal 0 if
+				; 5380 is present.
+
+	LD	(SCSI),A	; set scsi to zero or non-zero to 
+				; show presence of ncr 5380
+
+;
+; everything on the SCSI buss should have completed initialization and
+; SCSI reset may have been issued. 
+;
+; test for presence of 177x floppy disk controller.
+;
+	LD	A,0AAH		; test for presence of fdc
+	OUT	(WSEC),A	; write pattern to sector reg
+	LD	B,A		; save in 'b'
+	AND	0FH		; set up loop value
+CLOOP:	DEC	A		; give the 177x time for the sec reg
+	JP	NZ,CLOOP	;   to set up.
+	IN	A,(RSEC)	; read the sector reg
+	CP	B		; see if same as written to sec reg
+	JP	Z,CBOOT2	; 
+	JP	TRY$HD$DVR	; do hard disk, no fdc present
+;
+; floppy disk controller present try to boot from floppy
+;
+	LD	A,5
+	LD	(INT$RETRIES),A	; set up try count
+CBOOT2:	CALL	SETUP
+	CALL	READID
+	CALL	ERROR
+	JP	NZ,CBOOT2	; try to read id 5 times
+	LD	A,5
+	LD	(INT$RETRIES),A	; reset floppy try counter
+	LD	A,(IDSV+2)	; get sector #
+	CP	17
+	LD	A,0
+	JP	C,CB0
+	INC	A
+CB0:	LD	(TWOSID),A
+	OR	A
+	RLA
+	RLA
+	RLA
+	RLA
+	LD	(SBIAS),A	; 0 if single sided, 16 if 2 sided
+	LD	HL,RAM
+	LD	(DMAADR),HL
+	INC	A		; sector 1 ( or 17 )
+	OUT	(WSEC),A
+	CALL	READSEC
+	CALL	ERROR
+	LD	A,(TWOSID)
+	JP	NZ,CB0		; error occured try to read again
+	LD	A,(RAM)		; see if boot record there
+	CP	21H		; starts with lxi h,xxxx
+	JP	Z,RAM
+	CP	3EH		; other choice is mvi a,xx
+	JP	Z,RAM
+	JP	TRY$HD$DVR	; see if can do hard disk
+
+SETUP:	LD	A,'A'-40H+ROMOFF
+	OUT	(CONT),A	; select a:, side 0
+	LD	(SELBYT),A	; save it
+	CALL	FDCLR
+	LD	A,REST		; restore
+	CALL	OUTCMD		; to fdc
+	JP	FDWAIT		; Wait for command to complete and ret
+;
+; Read current track at dmaadr
+;
+READTRK:
+	LD	A,(IDSV+3)	; sector size
+	CP	3
+	LD	HL,SKWTBL1	; 96 tpi disk
+	JP	Z,RTLOOP
+	LD	HL,SKWTBL	; sector skew table
+RTLOOP:	LD	A,5		; 
+	LD	(INT$RETRIES),A	; set floppy try counter
+	LD	C,(HL)
+	INC	HL
+	INC	C
+	RET	Z		; finished
+	DEC	C
+	LD	A,(SBIAS)
+	ADD	A,C
+	LD	(SECTOR),A
+	OUT	(WSEC),A
+RSAGN:	PUSH	HL		; save skew table pointer
+	CALL	READSEC		; read the sector
+	CALL	ERROR		; check for errors
+	JP	NZ,RSAGN1	; try to read the sector again
+	LD	HL,(DMAADR)	; get current dmaadr address
+	LD	(DMA),HL	; save current dma addr
+	POP	HL		; restore skew table pointer
+	JP	RTLOOP		; next sector
+;
+; if error on read sector, restores old dma address and attempts
+; to read the same sector again.
+;
+RSAGN1:	LD	HL,(DMA)	; get old dmaadr dma address
+	LD	(DMAADR),HL	; restore dma address
+	POP	HL		; restore stack
+	JP	RSAGN
+;
+SKWTBL:	DEFB	1,2,3,4,5,6,7,8,9,10,255
+SKWTBL1:DEFB	1,2,3,4,5,255
+;
+; read id twice, once to see if disk in drive, the second for
+; the id value.
+;
+READID:	IN	A,(STAT)
+	IN	A,(RDAT)
+	LD	A,RDID
+	CALL	OUTCMD
+	CALL	FDWAIT		; See if will time out
+	CP	255		; no floppy
+	LD	(STATUS),A	; if timeout error, set error status
+	RET	Z		; if timeout just return
+	IN	A,(STAT)	; clear fdc reg
+	IN	A,(RDAT)
+	LD	HL,IDSV
+	LD	A,RDID
+	CALL	OUTCMD
+	CALL	RD
+	LD	A,B
+	LD	(STATUS),A
+	RET
+
+READSEC:IN	A,(STAT)	; clear status
+	IN	A,(RDAT)	; clear any trash
+	LD	HL,(DMAADR)
+	CALL	FDCLR
+	LD	A,RDSEC		; read sector command
+	CALL	OUTCMD		; to fdc
+	CALL	RD		; read loop
+	LD	A,B
+	LD	(STATUS),A
+	LD	(DMAADR),HL
+	RET
+
+RD:	IN	A,(STAT)
+	LD	B,A		; save status
+	RRA
+	RET	NC		; return when fdc not busy
+	RRA
+	JP	NC,RD		; wait for drq
+	IN	A,(RDAT)
+	LD	(HL),A
+	INC	HL
+	JP	RD
+
+STEPIN:	LD	A,(TWOSID)
+	OR	A
+	JP	Z,STPI
+	CALL	SIDEONE
+	LD	HL,TRACK
+	DEC	(HL)
+	LD	HL,MSEC		; wait one millisecond
+	JP	WT		; wt returns to caller
+STPI:	LD	A,STEPI		; step in command
+	CALL	OUTCMD
+STLP:	IN	A,(STAT)
+	RRA
+	JP	C,STLP
+	RET
+
+FDCLR:	LD	A,FI
+	OUT	(CMND),A
+	LD	A,0
+CL:	DEC	A
+	JP	NZ,CL
+	IN	A,(STAT)
+	IN	A,(RDAT)
+	RET
+
+OUTCMD:	OUT	(CMND),A
+	LD	A,19
+OC0:	DEC	A
+	JP	NZ,OC0		; wait 66.5 usec for fdc to set-up
+	RET
+
+SETDMA:	LD	(DMAADR),HL
+	LD	(DMA),HL
+	RET
+
+SIDEONE:LD	A,(SELBYT)
+	OR	SID1
+	OUT	(CONT),A
+	RET
+;
+; floppy error checking enters here.  Returns with zero flag NZ if
+; error, or Z if no error.  Floppy routines must set STATUS for error
+; conditions.
+;
+ERROR:	LD	A,(STATUS)
+	AND	ERMSK
+	RET	Z
+	PUSH	HL
+	LD	HL,INT$RETRIES	; point to retries
+	DEC	(HL)		; retries -1
+	POP	HL
+	RET	NZ		; try again
+	CALL	FDCRESET
+	LD	A,(SCSI)	; get 5380 present byte
+	AND	A
+	JP	Z,HD$DVR	; Try hard disk, have timed out on floppy
+				; disk at least 5 times
+;
+; floppy error falls thru to here also hard disk errors enter here to
+; start the hole proceedure over and over again.
+;
+ERROR1:	XOR	A		; make sure prom is turned on
+	OUT	(CONT),A	; (also resets FDC)
+	JP	0		; jmp to prom
+;
+WAIT:	LD	HL,100 * MSEC
+WT:	DEC	HL
+	LD	A,H
+	OR	L
+	JP	NZ,WT
+	RET
+;
+FDCRESET:
+	XOR	A		; re-enable ROM and reset FDC
+	OUT	(CONT),A
+	LD	A,29
+ERROR0:	DEC	A
+	JP	NZ,ERROR0	; wait 100 usec for fdc to reset
+	LD	A,ROMOFF	; turn ROM off and bring FDC 
+	OUT	(CONT),A	; out of reset
+	RET
+;
+;  This routine will wait for a for the FDC to go not busy, showing
+;  completion of a command.  After 1 seconds time out, a FORCE INTERRUPT
+;  command will be issued to the FDC.  Routines will come through here
+;  at least 5 times before final error occures.  Total time out 5 seconds.
+;
+FDWAIT:
+	LD	HL,TIMEOUT	; Point to timeout location
+	LD	(HL),3		; Set major loops for timeout 
+				; 3 = about 1 sec.
+DLOOP:	IN	A,(STAT)	; Get FDC status
+	RRA			; test busy bit
+	RET	NC		; .  zero status if busy non-active
+	RRA			; see if byte to be read
+	JP	C,FREAD		; read the byte
+	DEC	HL		; See if enough minor loops
+	LD	A,H		; .  (Approx 34,000 times)
+	OR	L		; .
+	JP	NZ,DLOOP	; Not done with minor loop
+	LD	HL,TIMEOUT	; Decrement major loop counter
+	DEC	(HL)		; .  (timeout loop count)
+	JP	NZ,DLOOP	; .
+	CALL	FDCLR		; force fdc clear
+	LD	A,ROMOFF	; delect floppies so floppy select
+	OUT	(CONT),A	; light will go out
+	XOR	A		; Set A to 0FFH and status to NZ
+	DEC	A		; 
+	RET			; 
+;
+FREAD:	IN	A,(RDAT)	; get the data byte from the fdc
+	JP	DLOOP		; just loop till command over
+;
+; timer entered with 'a' equal to number of major loops wanted
+; each major loop = aprox .25 sec
+;
+TIMER:	LD	HL,TIMEOUT
+	LD	(HL),A		; save major loop value
+TIMER0:	LD	HL,41668
+TIMER1:	DEC	HL		; 1.5
+	LD	A,L		; 1.0
+	OR	H		; 1.0
+	JP	NZ,TIMER1	; 2.5
+				; Total =  6 usec X 41668
+	LD	HL,TIMEOUT
+	DEC	(HL)
+	RET	Z
+	JP	TIMER0
+;
+;---------------------------------------------------------------
+; Send bytes to console until zero encountered
+; use to insert messages when debuging
+; format is
+;	call	puts
+;	db	'your message',0; must terminate with '0'
+;
+;PUTS:	pop	h		; 'hl' has address of msg
+;	mov	c,m		; get char
+;	inx	h
+;CONOUT:
+;	MVI	A,01H		; Check "all sent" bit in register 1
+;	OUT	84H		; .
+;	IN	84H		; .
+;	ANI	01H		; "ALL SENT" is bit 0
+;	JZ	CONOUT		;TRANSMIT BUFFER NOT READY
+;	MOV	A,C		;CHARACTER TO REGISTER A
+;	OUT	80H
+;	mov	a,m
+;	ana	a		; returns with char in 'a', null = end
+;	jnz	puts+1
+;	pchl			; hl has return address
+;-----------------------------------------------------------------
+;
+; if no boot sector is present on the floppy disk, floppy timeout
+; has occured, floppy read error, or no floppy disk controller is 
+; present, entry to the hard disk (scsi) driver is here. 
+; 
+; starts with 5 second timer to prevent hammering the scsi buss 
+; with possible scsi resets.
+;
+TRY$HD$DVR:
+	LD	A,20		; 20 x .25 seconds = 5 sec
+	CALL	TIMER
+;
+;  Hard disk driver
+;
+HD$DVR:	LD	SP,STACK	; reset stack
+
+	LD	HL,HDTRK
+	LD	(BOOT+19),HL	; patch readtrk
+	XOR	A		; zero 'a'
+	LD	HL,RAM		; address to read sector
+	LD	(HL),A		; clear anything at this address 
+	LD	(HDSECT),A	; zero hard disk sector
+	LD	(DMAADR),HL
+	CALL	SCSI$RD		; read boot sector
+	LD	A,(RAM)
+	CP	21H		; should be lxi h,xxxx
+	JP	Z,RAM
+	CP	3EH		; other choice is mvi a,xx
+	JP	Z,RAM
+	JP	ERROR1		; no boot sector go try floppy again
+;
+; Read hard disk system to memory. Do 16 sectors at a time. One AMPRO
+; hd track. The boot loader will call this routine twice.
+; First pass read sectors 0 thru 15, second pass read 16 thru 31 for
+; 32 sectors total.
+;
+HDTRK:	CALL	SCSI$RD
+	CP	0FFH
+	JP	Z,ERROR1	; if return has timeout error start all over
+	LD	HL,(DMAADR)
+	LD	DE,512		; update dma address
+	ADD	HL,DE
+	LD	(DMAADR),HL
+	LD	A,(HDSECT)	; see if two tracks (32 sectors)
+	INC	A		; next sector to read
+	CP	32		; have already read 512x32 bytes
+	RET	Z		; 
+	CP	16		; see if one "track" has been read
+	LD	(HDSECT),A	; update sector new sector, the boot
+				; loader reads two tracks.
+	RET	Z		; return to boot
+	JP	HDTRK		; loop till through
+;
+;
+;  SCSI return sense data command (Cmd 03)
+;
+
+SCSI$STAT$CMD:
+	DEFB	3		; 00 - REQUEST SENSE COMMAND
+	DEFB	0		; 01 - LOGICAL UNIT
+	DEFB	0		; 02 - RESERVED
+	DEFB	0		; 03 - RESERVED
+	DEFB	4		; 04 - NUMBER OF BYTES
+	DEFB	0		; 05 - RESERVED
+
+;
+;  SCSI read/write command (Cmd 08/0A)
+;
+
+SCSI$RD$CMD EQU	08H		; 08 IS READ DATA
+
+SCSI$RW$CMD:
+	DEFB	SCSI$RD$CMD	; 00 - 08=Read, 0A=Write
+HIGH$ADDR:
+	DEFB	0		; 01 - High address
+MED$ADDR:
+	DEFB	0		; 02 - Middle address
+LOW$ADDR:
+	DEFB	0		; 03 - Low address
+	DEFB	1		; 04 - Number of sectors
+STEP$RATE:
+	DEFB	0		; 05 - Step rate (Xebec)
+
+
+;
+;  Init scsi controller prameters
+;
+;  When called  HL = address of scsi command
+;               DE = address of prameter table
+;
+SETPRAM:
+	LD	(CMDPTR),HL	; set address of scsi command
+	EX	DE,HL		; 'de' to 'hl'
+	LD	(DATPTR),HL	; save address of parameters to pass
+	JP	SCSICMD
+;
+;  Read from the hard disk
+;
+SCSI$RD:
+	LD	HL,SCSI$RW$CMD	; Get command string
+	LD	(CMDPTR),HL	; Save the command pointer
+	CALL	BLD$SCSI$SCTR	; Build SCSI sector address
+;
+;  Exits with status in flags.  Z = timeout error
+;
+SCSICMD:
+	LD	HL,INT$RETRIES	; set up retry count
+	LD	(HL),2
+
+SCSICMDRETRY:
+	CALL	SELECT		; Perform the SCSI operation
+	LD	A,(STATUS)	; Get the return status
+	LD	(ERFLAG),A	; save error
+	CP	0FFH		; Timeout?
+	JP	Z,SCSI$DONE	; Yes, go save timeout status
+	AND	2		; Check for SCSI error status
+	RET	Z		; No error -- return
+
+	LD	HL,INT$RETRIES	; see if any retries remain
+	DEC	(HL)
+	JP	Z,SCSI$DONE	; NO more remain, exit and set flags
+
+; Save current command and data pointers
+
+	LD	HL,(DMAADR)
+	LD	(SAVE$DMA),HL	; save old data pointer
+	LD	HL,(CMDPTR)
+	LD	(SAVE$CMDPTR),HL ; save old command pointer
+
+; Request SCSI sense.
+
+	LD	HL,MESSAGE	; .  for request sense command
+	LD	(DMAADR),HL
+	LD	HL,SCSI$STAT$CMD ; Set up data and command pointers
+	LD	(CMDPTR),HL
+	CALL	SELECT		; Execute request sense command
+
+; Restore pointers and retry command
+
+	LD	HL,(SAVE$DMA)	; restore old data pointer
+	LD	(DMAADR),HL
+	LD	HL,(SAVE$CMDPTR) ; restore old command pointer
+	LD	(CMDPTR),HL
+	JP	SCSICMDRETRY	; command retry
+
+SCSI$DONE:
+	OR	A		; Set Z/NZ for user
+	RET			; and return
+;
+;
+;  Build 2-byte SCSI sector number starting with 00
+;
+;  NOTE:  This routine uses only a block number starting with 00
+;         and reads a maximum of ffh sectors.
+;
+BLD$SCSI$SCTR:
+	LD	A,(HDSECT)
+	LD	(LOW$ADDR),A
+	RET
+;
+;  Select controller, and fall through to phase if selected ok.
+;
+BUSBSY	EQU	40H
+
+SELECT:	XOR	A
+	OUT	(NCRICR),A	; Clear initiator command register
+	OUT	(NCRTCR),A	; .  and target command register
+
+CLEAR$ARBIT:
+	XOR	A
+	OUT	(NCRMR),A	; .
+	IN	A,(NCRRPI)	; reset interrupts
+
+ARBITRATE:
+	LD	A,(MYID)	; Assert my ID (the initiator)
+	OUT	(NCRODR),A	; .
+	LD	A,1		; start arbitration
+	OUT	(NCRMR),A	; .
+
+IN$PROGRESS:
+	IN	A,(NCRICR)	; Wait for "arbitration in 
+	AND	40H		; .  progress" bit
+	JP	NZ,WONARBITRATE ; we have arbitration
+	IN	A,(NCRBSR)
+	AND	10H		; see if scsi reset has occured 
+	JP	Z,IN$PROGRESS
+	JP	CLEAR$ARBIT
+
+WONARBITRATE:
+	LD	A,(MYID)
+	LD	B,A
+	IN	A,(NCRCSD)	; See if we're the highest priority
+	SUB	B		; .  remove my addr
+	SUB	B		; .  compare my addr to bus data
+	JP	M,I$WIN		; We win if result < 0
+	JP	CLEAR$ARBIT	; .  otherwise we lose -- start over
+
+I$WIN:	IN	A,(NCRICR)	; Check again for lost arbitration
+	AND	20H		; .  (just in case)
+	JP	NZ,CLEAR$ARBIT	; We lost -- start over
+
+
+	LD	A,08H		; Set assert BSY bit in ICR
+	OUT	(NCRICR),A	; .
+	IN	A,(NCRMR)	; Reset arbitration bit
+	AND	0FEH		; .
+	OUT	(NCRMR),A	; .
+
+	IN	A,(NCRICR)	; OR in SEL to ICR
+	OR	04H
+	OUT	(NCRICR),A
+
+	LD	A,(MYID)	; Select target: get our ID,
+	LD	B,A		; .
+	LD	A,(TARGET)	; .  or in target ID
+	OR	B		; .
+	OUT	(NCRODR),A	; .  and send to NCR chip
+
+	IN	A,(NCRICR)
+	OR	01H		; Assert data bus
+	OUT	(NCRICR),A	; .
+
+	LD	A,05H		; Release BSY, keep SEL
+	OUT	(NCRICR),A	; .  and assert data bus
+
+	LD	BC,6000H	; 250 ms loop (1M cycles)
+
+STIM:
+	IN	A,(NCRCSBS)	; Wait for BSY
+	AND	BUSBSY		; .
+	JP	NZ,SELECT$OK	; Got him!
+
+	DEC	C
+	JP	NZ,STIM		; inner loop:  41*256 = 10496 cycles
+	DEC	B
+	JP	NZ,STIM		; outer loop: 10510*96 = 1M cycles
+
+	XOR	A		; Select timeout -- clear bus
+	OUT	(NCRODR),A
+
+	DEC	A		; set 'a' to 0ffh
+	LD	(STATUS),A	; Save status timeout.
+	JP	ALL$DONE	; and clear the registers
+
+SELECT$OK:
+	XOR	A		; Set good status
+
+ALL$DONE:
+	LD	B,A		; save status
+	LD	A,01H		; Release SEL
+	OUT	(NCRICR),A	; .
+	XOR	A		; Release data bus
+	OUT	(NCRICR),A	; .
+	LD	A,B		; Get status back
+	OR	A		; Set status
+	RET	NZ
+	DEC	A		; set 'a' to ffh
+	LD	(STATUS),A	; clear scsi status to timeout..
+
+; SCSI.011
+
+; * * * * *  
+; *  --------\	NOTE: we fall through if we successfully
+; *  --------/	selected the controller!!
+; * * * * *
+
+	LD	A,00000110B	; Set DMA mode and Monitor Busy  
+	OUT	(NCRMR),A	; .
+
+SCSI$RDY:
+; Wait for either a 5380 "Interrupt" or a REQ from Target.
+; The REQ is needed since it may have come too soon after
+; selection to register an Interrupt.
+	IN	A,(NCRBSR)	; Check for "Interrupt"
+	AND	00010000B	; .
+	JP	NZ,SCSI$INT
+	IN	A,(NCRCSBS)	; Check for REQ
+	AND	NCRREQ		; .
+	JP	Z,SCSI$RDY	; Wait for Interrupt or REQ
+	JP	PHASE		; Process phase vector
+
+SCSI$INT:
+;  Determine cause of 5380 "Interrupt".  Either phase
+;  changed, busy dropped, or bus was reset.  If bits 2 and 3
+;  of the NCRBSR are not 0's when the Interrupt flag (bit 4)
+;  is set, then it is either a loss of BUSY or an SCSI RESET.
+	XOR	A
+	OUT	(NCRICR),A	; Release data bus
+	IN	A,(NCRBSR)	; Read 5380 Bus and Stat Reg
+	AND	00001100B	; Keep interesting bits
+	JP	NZ,SCSI$EXIT	; Reset or Busy Loss: Exit
+				; 00 --> Process phase vector
+
+PHASE:
+; DMA mode and Monitor Busy must be cleared prior to clearing
+; of the 5380 Interrupt Flag.  Then mode register is restored.
+; Otherwise the interrupt flag may not clear and the DMA Mode 
+; may not be useable.  
+	XOR	A		; Clear 5380 Mode Register
+	OUT	(NCRMR),A	; .
+	IN	A,(NCRRPI)	; Reset interrupts
+	LD	A,00000110B	; Set DMA mode and Monitor Busy
+	OUT	(NCRMR),A	; .
+	IN	A,(NCRCSBS)	; Update phase...
+	AND	00011100B	; Mask all but phase bits, clear carry bit
+	RRA			; Rotate over for target
+	LD	E,A		; . (Save for use with jump table)
+	RRA			; .
+	OUT	(NCRTCR),A	; Set phase
+	LD	D,0		; E is already set (6 ins ago)
+	LD	HL,PHASE$TABLE	; Get phase jump table base
+	ADD	HL,DE		; Add offset for this phase
+	LD	A,(HL)		; Get phase pointer into HL
+	INC	HL		; .
+	LD	H,(HL)		; .
+	LD	L,A		; Pointer is now together
+	LD	D,01000000B	; DMA request mask (used by RSCSI and WRSCSI)
+	JP	(HL)		; Go to it!
+
+PHASE$TABLE:
+	DEFW	PHASE0
+	DEFW	PHASE1
+	DEFW	PHASE2
+	DEFW	PHASE3
+	DEFW	PHASE4
+	DEFW	PHASE5
+	DEFW	PHASE6
+	DEFW	PHASE7
+
+PHASE0:				; Data out phase
+	LD	HL,(DATPTR)	; to pass parameters to scsi controller
+	JP	WSCSI		; Execute SCSI write routine
+
+PHASE1:				; Data in phase ...
+	LD	HL,(DMAADR)	; Use data pointer
+	JP	RSCSI		; Execute SCSI read routine
+
+PHASE2:				; Command out phase ...
+	LD	HL,(CMDPTR)	; Use command pointer
+	JP	WSCSI		; Execute SCSI write routine
+
+PHASE3:				; Status in phase ...
+	LD	HL,STATUS	; Use status pointer
+	JP	RSCSI		; Execute SCSI read routine
+
+PHASE7:				; Message in phase ...
+	LD	HL,MESSAGE	; Use message pointer
+	JP	RSCSI		; Execute SCSI read routine
+
+; Currently unused phases
+
+PHASE4:
+PHASE5:
+PHASE6:
+SCSI$EXIT:
+	XOR	A		; clean up 5380 and exit
+	OUT	(NCRTCR),A	; .
+	OUT	(NCRMR),A	; .
+	IN	A,(NCRRPI)	; reset unterrupts
+	RET			; .
+
+; Generalized SCSI write routine
+
+WSCSI:
+	LD	A,1		; Assert data bus
+	OUT	(NCRICR),A
+	OUT	(NCRSDS),A	; Start DMA send
+
+; Wait for DMA request, keeping an eye on phase.  Note that the NCR
+; will not issue an ACK, nor will it generate DMA requests once the
+; phase changes, so it is best to treat DMA request checking as a
+; higher priority than phase change checking.
+
+WSCSI1:
+	IN	A,(NCRBSR)
+	LD	B,A		; Save status for use below
+	AND	D		; Check for DMA request
+	JP	Z,WSCSI2
+	LD	A,(HL)
+	OUT	(NCRDACK),A
+	INC	HL
+	JP	WSCSI1		; Write more bytes until phase changes
+;
+; This code skipped when data is being transferred ...
+;
+WSCSI2:
+	LD	A,B		; Check 5380 "interrupt" flag
+	AND	00010000B	; .
+	JP	Z,WSCSI1	; Wait for DMA request,
+	JP	SCSI$INT	;  or Process "interrupt"
+
+; Generalized SCSI read routine
+
+RSCSI:
+; Initiator command reg is already ininialized by phase
+
+	OUT	(NCRSDIR),A	; Start DMA initiator receive
+
+; Wait for DMA request, keeping an eye on phase.  Note: we must do
+; a check for DMA request before checking for a phase change, since
+; a byte may be queued up waiting to be DACKed prior to the phase
+; change.
+;
+RSCSI1:
+	IN	A,(NCRBSR)
+	LD	B,A		; Keep for phase change checking
+	AND	D		; Mask for DMA request
+	JP	Z,RSCSI2
+
+;
+; All transfer is one byte at a time
+; 
+	IN	A,(NCRDACK)
+	LD	(HL),A
+	INC	HL
+	JP	RSCSI1		; Read until phase changes
+
+; This code skipped when data is being transferred ...
+RSCSI2:
+	LD	A,B		; Check phase
+	AND	00010000B	; .
+	JP	Z,RSCSI1	; Wait for DMA request
+	JP	SCSI$INT	; Process "interrupt" flag
+;
+; Tempory storage
+;
+INT$RETRIES:
+	DEFB	5		; number of retries
+DMA:	DEFW	0		; save for dma address
+TIMEOUT:DEFB	0
+MYID:	DEFB	0
+TARGET:	DEFB	0
+ERFLAG:	DEFB	0
+HDSECT:	DEFB	0
+DATPTR:	DEFW	0
+CMDPTR:	DEFW	0
+MESSAGE:DEFW	0,0
+SCSI:	DEFB	0
+SAVE$DMA:
+	DEFW	0
+SAVE$CMDPTR:
+	DEFW	0
+
+	END

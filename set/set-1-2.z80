@@ -1,0 +1,909 @@
+;                   ***********************************************
+;                   *                                             *
+;                   *                    SET.ASM                  *
+;                   *              AMPRO Little Board             *
+;                   *      Serial/Parallel Port Setup Utility     * 
+;                   *                                             *
+;                   *   Copyright (C) 1985, AMPRO Computers Inc.  *
+;                   *                                             *
+;                   ***********************************************
+
+;	Version 1.2  - 10 November 21 - Fixed 450 baud clock divisor (swh)
+;	Version 1.1  - 12 August 21 - BIOS data rearranged (swh)
+; 	Version 1.0  - 15 June 85 - Initial release (fsw)
+
+;
+VERS	EQU	12		; ver 1.2
+;
+; SET.Z80 will allow the system communication prameters to be 
+; changed from the command line.  All changes will be in memory 
+; resident bios and will not modify the disk as in CONFIG.COM.  
+; Commands are in the following format and variations.
+;
+; SET TERMINAL=PORT A
+; SET TERMINAL=PORT B
+; SET PRINTER=PORT A
+; SET PRINTER=PORT B
+; SET PRINTER=PARALLEL
+; SET PORT A=9600,8,A,N,Y
+;              ^  ^ ^ ^ ^
+;              |  | | | Hand shake (Y)es or (N)o
+;              |  | | Parity (O)dd,(E)ven,(N)one
+;              |  | Stop bits (A=1,B=1.5,C=2)
+;              |  Data bits (5,6,7,8)
+;              Baud rate (110,300,450,600,1200,2400,4800,9600,19.2,38.4)
+; SET PORT B=same as port A (no 19.2,38.4 baud)
+; SET ?  show current prameters
+;
+; -----------------------------------------------------------------------
+;
+; ascii equates
+;
+LF	EQU	0AH		; line feed
+CR	EQU	0DH		; carriage return
+SPC	EQU	20H		; space
+ESC	EQU	1BH
+;
+; cp/m equates
+;
+BDOS	EQU	05H		; bdos entry point
+BIOS	EQU	01H		; address of warm boot in bios
+FCN	EQU	5CH		; default fcn
+CMDTAL	EQU	80H		; location of command tail
+WMBOOT	EQU	00H		; jmp to warm boot
+TPA	EQU	100H		; start of tpa
+;
+	ORG	TPA		; start of tpa
+;
+START:	LD	HL,0
+	ADD	HL,SP		; hl=ccp stack pointer
+	LD	(RETURN),HL	; save ccp stack pointer
+	LD	SP,STACK
+	LD	A,(CMDTAL)	; see if entry on command line
+	OR	A		; zero ?
+	JP	NZ,BEGIN	; 
+;
+START1:	CALL	ILPRT		; 
+	DEFB	CR,LF,'No command given.',0
+START2:	CALL	ILPRT
+	DEFB	CR,LF,'SET command choices are:',CR,LF,LF
+	DEFB	'        SET TERMINAL=PORT A or PORT B',CR,LF,LF
+	DEFB	'        SET PRINTER=PORT A, PORT B, or PARALLEL',CR,LF,LF
+	DEFB	'        SET PORT A=9600,8,A,N,Y',CR,LF
+	DEFB	'                     |  | | | |',CR,LF
+	DEFB	'                     |  | | | Hardware Hand shake: (Y)es or (N)o',CR,LF
+	DEFB	'                     |  | | Parity: (O)dd,(E)ven,(N)one',CR,LF
+	DEFB	'                     |  | Stop bits: (A)=1,(B)=1.5,(C)=2',CR,LF
+	DEFB	'                     |  Data bits: (5),(6),(7),(8)',CR,LF
+	DEFB	'                     Baud rate: (110),(300),(450),(600),(1200),',CR,LF
+	DEFB	'                         (2400),(4800),(9600),(19200),(38400)',CR,LF,LF
+	DEFB	'        SET PORT B=same as port A (no 19200,38400 baud)',CR,LF,LF
+	DEFB	'        SET ?  --> to display current settings',CR,LF,0
+;
+	JP	EXIT
+;
+BEGIN:	CALL	GETBIO		; get current system parameters
+	LD	HL,CMDTAL
+BEG1:	INC	HL		; point to begining of command input
+	LD	A,(HL)
+	CP	SPC		; skip the spaces
+	JR	Z,BEG1
+	AND	A		; end of command line=0
+	JP	Z,START1	; had just spaces, give message and exit
+	EX	DE,HL		; 'de'=start of command
+	CALL	COMPARE
+	DEFB	'PORT A',0	; set port A
+	JR	NC,PORTA
+	CALL	COMPARE
+	DEFB	'PORT B',0	; set port B
+	JR	NC,PORTB
+	CALL	COMPARE
+	DEFB	'PRINTER',0	; printer
+	JP	NC,PRN
+	CALL	COMPARE
+	DEFB	'TERMINAL',0
+	JR	NC,TERM		; set terminal port
+	CALL	COMPARE
+	DEFB	'?',0		; give current system parameters
+	JP	NC,NOW
+	JP	BDEXIT		; no match, exit
+;
+;
+; set terminal to port a or b
+;
+TERM:	CALL	DELIM		; get position of subcmd
+	JP	C,BDEXIT	; was none
+	EX	DE,HL		; address of subcmd in 'de'
+	CALL	COMPARE
+	DEFB	'PORT A',0
+	LD	B,01H		; con:=crt:
+	JR	NC,PTA
+	CALL	COMPARE
+	DEFB	'PORT B',0
+	LD	B,00H		; con:=tty:
+	JP	C,BDEXIT
+;
+PTA:	LD	A,(IOBYT)	; get i/o byte
+	AND	0FCH		; mask con: bits
+	OR	B		; or new con: bits
+	LD	(IOBYT),A	; save
+	JP	GOODEX		; 
+;
+; set up the ports
+;
+PORTB:	LD	A,DARTB-DARTA	; offset in dart table
+	LD	(PORT),A
+	JR	PORTC		; 
+;
+PORTA:	XOR	A		; clear a
+	LD	(PORT),A	; set work value to port A
+PORTC:	CALL	DELIM		; find the delimeter '='
+	JP	C,BDEXIT	; ???????????????????
+	CALL	GETSPD		; get speed, set ctc
+;
+; do the rest
+;
+PORTD:	CALL	GETNXT		; get the next option
+	LD	A,'5'
+	CP	(HL)
+	JR	Z,BIT5		; 5 data bits
+	INC	A
+	CP	(HL)
+	JR	Z,BIT6		; 6 data bits
+	INC	A
+	CP	(HL)
+	JR	Z,BIT7		; 7 data bits
+	INC	A
+	CP	(HL)
+	JP	NZ,BDEXIT	; if bad input no changes made
+	LD	A,60H		; word length=8
+	JR	SETWR5
+;
+BIT5:	XOR	A		; word length=5
+	JR	SETWR5
+;
+BIT6:	LD	A,40H		; word length=6
+	JR	SETWR5
+;
+BIT7:	LD	A,20H		; word length=7
+;
+SETWR5:	PUSH	AF		; save 'a'
+	LD	A,60H		; clear word length
+	LD	B,AWR5C-DARTA	; offset to wr5
+	CALL	CLRWR		; clear word length bits
+	POP	AF		; get 'a'
+	PUSH	AF		; and save again
+	OR	(HL)		; or in the new value
+	LD	(HL),A		; new value to wr5	
+;
+	LD	A,0C0H		; do wr3 also, mask value
+	LD	B,AWR3C-DARTA	; offset to wr3
+	CALL	CLRWR
+	POP	AF		; get bits back
+	RLCA			; rotate bits into position
+	OR	(HL)
+	LD	(HL),A		; new value in wr3
+;
+; stop bits 1,1.5,2 ?
+;
+STPBIT:	LD	HL,(TEMP0)	; where we are on the command line
+STPBT1:	INC	HL
+	LD	A,(HL)		; next char
+	CP	','
+	JR	Z,STPBT1	; skip over the ','
+	AND	A
+	JP	Z,BDEXIT	; no input
+	CP	'A'		; first value
+	JP	C,BDEXIT	; not valid
+	CP	'C'+1		; last value
+	JP	NC,BDEXIT	; not valid
+	LD	(TEMP0),HL	; save command line pointer
+	CP	'A'
+	JR	Z,STPBT2	; one stop bit
+	CP	'B'
+	JR	Z,STPBT3	; 1.5 stop bit
+;
+	LD	A,0CH		; two stop bits
+	JR	STPBT4
+;
+STPBT2:	LD	A,04H		; one stop bit
+	JR	STPBT4
+;
+STPBT3:	LD	A,08H		; 1.5 stop bit
+;
+STPBT4:	PUSH	AF		; save 'a'
+	LD	B,AWR4C-DARTA	; offset to wr4 command
+	LD	A,0CH		; clear stop bits
+	CALL	CLRWR		; 
+	POP	AF
+	OR	(HL)
+	LD	(HL),A		; save new value in wr4
+;
+; parity odd,even,none
+;
+PARITY:	LD	HL,(TEMP0)	; get command line pointer back
+PAR1:	INC	HL		; 
+	LD	A,(HL)
+	CP	','
+	JR	Z,PAR1		; skip ','
+	LD	(TEMP0),HL	; save command line pointer
+	AND	A
+	JP	Z,BDEXIT	; no entry
+	CP	'E'		; even
+	JP	C,BDEXIT	; not valid
+	CP	'O'+1		; odd
+	JP	NC,BDEXIT	; must be between 'E' and 'O'
+	CP	'E'
+	JR	Z,PAR2		; even parity
+	CP	'O'
+	JR	Z,PAR3		; odd parity
+;
+	XOR	A		; no parity
+	JR	PAR4
+;
+PAR2:	LD	A,03H		; even parity
+	JR	PAR4
+;
+PAR3:	LD	A,01		; odd parity
+;
+PAR4:	PUSH	AF		; save 'a'
+	LD	A,3		; bits to clear for parity
+	LD	B,AWR4C-DARTA	; offset to wr4 command reg
+	LD	HL,DARTA
+	CALL	CLRWR		; clear bits
+	POP	AF
+	OR	(HL)
+	LD	(HL),A		; save parity
+;
+HANDSK:	LD	HL,(TEMP0)	; get command line pointer
+HAND1:	INC	HL
+	LD	A,(HL)		; 
+	CP	','		; skip delimiter
+	JR	Z,HAND1
+	AND	A
+	JP	Z,BDEXIT	; end of command line
+	CP	'Y'		; yes
+	JR	Z,HAND2
+	CP	'N'		; no
+	JP	NZ,BDEXIT
+;
+HAND2:	PUSH	AF		; save Y or N
+	LD	A,(PORT)	; port A or B
+	AND	A
+	JR	Z,HAND3		; do port A
+	POP	AF		; 
+	AND	01H		; lsb of Y=1,N=0
+	LD	(HSB),A
+	JP	GOODEX		; 
+;
+HAND3:	POP	AF		; restore 'a'
+	AND	01H		; mask lsb
+	LD	(HSA),A
+	JP	GOODEX		; make changes
+;
+; getspd, sets port speed value, entered with 'de'= to command
+; input. set ctc divisor wr4 in syspram
+;
+GETSPD:	EX	DE,HL		; string to 'de'
+	CALL	COMPARE
+	DEFB	'110',0
+	LD	A,0		; 0=110 baud
+	JP	NC,SPDEXT
+	CALL	COMPARE
+	DEFB	'300',0
+	LD	A,1		; 1=300 baud
+	JR	NC,SPDEXT
+	CALL	COMPARE
+	DEFB	'450',0
+	LD	A,2		; 2=450 baud
+	JR	NC,SPDEXT
+	CALL	COMPARE
+	DEFB	'600',0
+	LD	A,3		; 3=600 baud
+	JR	NC,SPDEXT
+	CALL	COMPARE
+	DEFB	'1200',0
+	LD	A,4		; 4=1200 baud
+	JR	NC,SPDEXT
+	CALL	COMPARE
+	DEFB	'2400',0
+	LD	A,5		; 5=2400 baud
+	JR	NC,SPDEXT
+	CALL	COMPARE
+	DEFB	'4800',0
+	LD	A,6		; 6=4800 baud
+	JR	NC,SPDEXT
+	CALL	COMPARE
+	DEFB	'9600',0
+	LD	A,7		; 7=9600 baud
+	JR	NC,SPDEXT
+	CALL	COMPARE
+	DEFB	'19200',0
+	LD	A,8		; 8=19200 baud
+	JR	NC,SPDEXT
+	CALL	COMPARE
+	DEFB	'38400',0
+	LD	A,9		; 9=38400 baud
+	JR	NC,SPDEXT
+	CALL	COMPARE
+	DEFB	'19.2',0
+	LD	A,8		; 8=19200 baud
+	JR	NC,SPDEXT
+	CALL	COMPARE
+	DEFB	'38.4',0
+	LD	A,9		; 9=38400 baud
+	JP	C,BDEXIT
+;
+SPDEXT:	LD	(SPEED),A
+	LD	A,0C0H		; clear clock divisor mask
+	LD	B,AWR4C-DARTA	; offset to wr4 command
+	CALL	CLRWR
+	PUSH	HL		; save wr4 address
+	LD	A,(SPEED)
+	LD	HL,CLK		; clock table
+	CALL	LOOKUP		; get clock divisor address
+	LD	A,(HL)		; clock divisor
+	POP	HL		; get wr4 address
+	OR	(HL)		; or in clock divisor bits
+	LD	(HL),A		; and save
+	LD	A,(SPEED)
+	LD	HL,CTCDIV	; ctc divisor table
+	CALL	LOOKUP		; returns 'l'=ctc command, 'h'=ctc divisor
+	LD	A,(PORT)	; see if port a or b
+	AND	A
+	JR	Z,SPEX1		; zero=port a
+	LD	A,(SPEED)	; get speed setting
+	CP	8		; more than 9600 ?
+	JP	NC,BDEXIT	; yes, exit
+	LD	(CTC1),HL	; for port b
+	RET
+;
+SPEX1:	LD	(CTC0),HL	; for dart a
+	LD	A,(SPEED)
+	CP	8		; less than 19.2
+	JR	C,SPDEX2	; yes
+	LD	A,80H		; turn off dtr
+	LD	B,AWR5C-DARTA	; offset to wr5
+	CALL	CLRWR
+	RET
+;
+SPDEX2:	LD	A,80H		; clear dtr
+	LD	B,AWR5C-DARTA	; offset to wr5
+	CALL	CLRWR
+	LD	A,80H		; set dtr
+	OR	(HL)
+	LD	(HL),A		; store dtr on
+	RET
+;
+PRN:	CALL	DELIM		; get subcommand pointer
+	JP	C,BDEXIT	; delimeter not found, exit
+	EX	DE,HL		; subcommand pointer in 'de'
+	CALL	COMPARE
+	DEFB	'PORT A',0
+	LD	B,40H
+	JR	NC,PRN1
+	CALL	COMPARE
+	DEFB	'PORT B',0
+	LD	B,00H
+	JR	NC,PRN1
+	CALL	COMPARE
+	DEFB	'PARALLEL',0
+	LD	B,80H
+	JR	C,BDEXIT	; no match, exit
+;
+PRN1:	LD	A,(IOBYT)
+	AND	3FH		; mask lst: bits
+	OR	B
+	LD	(IOBYT),A
+	JR	GOODEX
+;
+; exit back to system
+;
+GOODEX:	CALL	PUTBIO		; put changes in bios
+	LD	HL,GDEXIT
+	PUSH	HL		; set up for return
+	LD	A,57		; ioinit offset
+	LD	HL,(BIOS)	; get warm boot address
+	LD	L,A		; modify with offset to init
+	JP	(HL)		; do bios init
+;
+GDEXIT:	CALL	ILPRT
+	DEFB	CR,LF,LF
+	DEFB	'           New parameters installed in bios and initialized'
+	DEFB	CR,LF,0
+;
+; exit, no warm boot
+;
+EXIT:	LD	HL,(RETURN)	; recover ccp stack pointer
+	LD	SP,HL		; 
+	RET
+;
+; exit, error in command line
+;
+BDEXIT:	CALL	ILPRT
+	DEFB	CR,LF,'Command line error',CR,LF,LF,0
+	JP	START2
+;
+; getnxt, return the single character options seperated by commas
+; on the command line. 'hl' points to option
+;
+GETNXT:	LD	HL,(TEMP0)	; get command line pointer
+GETNX1:	LD	A,(HL)
+	CP	','
+	INC	HL		; point to value or next position
+	JR	NZ,GETNX1
+	LD	A,(HL)		; get option
+	LD	(TEMP0),HL	; save pointer
+	AND	A
+	RET	NZ
+	SCF			; set carry=end of command line
+	RET
+;
+;
+; clrwr, clear bits in dart wr. entered with mask in 'a' and offset
+; in 'b'. returns address of reg in 'hl'
+;
+CLRWR:	PUSH	AF		; save 'a'
+	LD	HL,DART		; dart sysint values
+	LD	A,(PORT)	; port has offset
+	LD	D,0
+	LD	E,A
+	ADD	HL,DE		; dart 'a' or 'b' side
+	LD	E,B		; offset to reg
+	ADD	HL,DE		; 'hl'=reg location
+	POP	AF		; restore mask
+	CPL			; invert bits
+	AND	(HL)		; clear bits
+	LD	(HL),A		; save wr with bits cleared
+	RET
+;
+; lookup, entered with address table in 'hl' and multiplier in 'a',
+; returns with 'hl' pointing to variable length data string.
+;
+LOOKUP:	LD	D,0		; zero 'd'
+	ADD	A,A		; 'a'x2
+	LD	E,A
+	ADD	HL,DE		; add 'de' to 'hl'
+	LD	E,(HL)		; get address table in 'de'
+	INC	HL		; next byte
+	LD	D,(HL)
+	EX	DE,HL		; address of string in 'hl'
+	RET
+;
+; delim, returns address of first character after delimiter (=)
+; or carry set if none found
+;
+DELIM:	LD	HL,CMDTAL	; command tail
+DELIM1:	INC	HL
+	LD	A,(HL)
+	AND	A		; see if zero
+	JR	Z,DELIM2	; end of command line 
+	CP	'='
+	JR	NZ,DELIM1	; loop till delimiter or end
+	INC	HL		; start of subcommand
+	LD	(TEMP0),HL	; save start of subcomand
+	RET
+;
+DELIM2:	SCF			; set carry=no subcommad
+	RET
+;
+; now, print current parameters
+;
+NOW:	CALL	ILPRT
+	DEFB	CR,LF,'Current System Configuration is:',LF
+	DEFB	CR,LF,'Terminal         = ',0
+	LD	A,(IOBYT)
+	AND	03H		; mast CON: bits
+	LD	HL,DEV		; device table
+	CALL	LOOKUP
+	CALL	PRINT		; print device 
+	CALL	ILPRT
+	DEFB	CR,LF,'Printer          = ',0
+	LD	A,(IOBYT)
+	AND	0C0H		; mask LST: bits
+	RLCA
+	RLCA			; put bits in low nibble
+	LD	HL,DEV		; device table
+	CALL	LOOKUP
+	CALL	PRINT
+;
+	CALL	ILPRT
+	DEFB	CR,LF,LF
+	DEFB	'Serial Port A:     '
+	DEFB	'Baud Rate   = ',0
+	LD	BC,CTC0
+	LD	DE,AWR4C	; A dart wr4
+	CALL	GTBAUD		; get baud rate
+	CALL	PRINT		; print baud rate
+	CALL	ILPRT
+	DEFB	CR,LF
+	DEFB	'                   Data bits   = ',0
+	LD	A,(AWR3C)	; wr3 has number of data bits
+	CALL	SHDBIT		; show data bits
+	CALL	ILPRT
+	DEFB	CR,LF
+	DEFB	'                   Stop bits   = ',0
+	LD	A,(AWR4C)	; wr4 has stop bits
+	CALL	SHSBIT		; show stop bits
+	CALL	ILPRT
+	DEFB	CR,LF
+	DEFB	'                   Parity      = ',0
+	LD	A,(AWR4C)	; wr4 has parity
+	CALL	SHPBIT		; show parity
+	CALL	ILPRT
+	DEFB	CR,LF
+	DEFB	'                   Handshake   = ',0
+	LD	A,(HSA)
+	CALL	SHHSK		; show handshake
+;
+	CALL	ILPRT
+	DEFB	CR,LF,LF
+	DEFB	'Serial Port B:     '
+	DEFB	'Baud Rate   = ',0
+	LD	BC,CTC1
+	LD	DE,BWR4C	; A dart wr4
+	CALL	GTBAUD		; get baud rate
+	CALL	PRINT		; print baud rate
+	CALL	ILPRT
+	DEFB	CR,LF
+	DEFB	'                   Data bits   = ',0
+	LD	A,(BWR3C)	; wr3 has number of data bits
+	CALL	SHDBIT		; show data bits
+	CALL	ILPRT
+	DEFB	CR,LF
+	DEFB	'                   Stop bits   = ',0
+	LD	A,(BWR4C)	; wr4 has stop bits
+	CALL	SHSBIT		; show stop bits
+	CALL	ILPRT
+	DEFB	CR,LF
+	DEFB	'                   Parity      = ',0
+	LD	A,(BWR4C)	; wr4 has parity
+	CALL	SHPBIT
+	CALL	ILPRT
+	DEFB	CR,LF
+	DEFB	'                   Handshake   = ',0
+	LD	A,(HSB)
+	CALL	SHHSK		; show handshake
+	CALL	ILPRT
+	DEFB	CR,LF,0
+	JP	EXIT
+;
+; show handshake
+;
+SHHSK:	LD	HL,HNDSH	; yes or no
+	CALL	LOOKUP
+	JP	PRINT		; print, return
+;
+; show parity
+;
+SHPBIT:	AND	03H		; mask parity bits
+	LD	HL,PRTY		; parity table
+	CALL	LOOKUP
+	JP	PRINT		; print parity, and return
+;
+; show stop bits
+;
+SHSBIT:	AND	0CH		; mask stop bits
+	RRCA
+	RRCA			; put bits in position
+	LD	HL,SBITS	; stop bits table
+	CALL	LOOKUP
+	JP	PRINT		; print it, return to caller
+;
+; show data bits
+;
+SHDBIT:	AND	0C0H		; mask data bit length
+	RLCA
+	RLCA			; put bits in low nibble
+	LD	HL,DBITS	; data bits table
+	CALL	LOOKUP
+	JR	PRINT		; print it, return to caller
+;
+; print the baud rate. 'bc' points to ctc init string, 
+; 'de' points to dart init string
+;
+GTBAUD:	LD	A,(BC)		; get first ctc byte
+	CP	3		; reset?
+	JR	Z,GTBAU1	; must be 19.2 +
+	CP	47H
+	LD	HL,B1
+	RET	NZ		; must be 7, print 110 baud
+	INC	BC		; point to second byte of ctc string
+	LD	A,(BC)
+	CP	13
+	LD	HL,B96
+	RET	Z		; print 9600 baud
+	CP	26
+	LD	HL,B48
+	RET	Z		; print 4800 baud
+	CP	52
+	LD	HL,B24
+	RET	Z		; print 2400 baud
+	CP	104
+	LD	HL,B12
+	RET	Z		; print 1200 baud
+	CP	208
+	LD	HL,B4
+	RET	NZ		; print 450 baud
+	LD	A,(DE)		; wr4 info
+	AND	0C0H		; mask
+	CP	40H
+	LD	HL,B6
+	RET	Z		; 600 baud
+	LD	HL,B3		; 300 baud
+	RET
+;
+GTBAU1:	LD	A,(DE)		; wr4 info
+	AND	0C0H
+	CP	40H
+	LD	HL,B384
+	RET	Z
+	LD	HL,B192
+	RET
+;
+; compare a string of characters addressed by 'de' terminated
+; with 0h. returns with cary set if no match
+;
+COMPARE:
+	EX	(SP),HL		; the stack has the pointer to the
+	PUSH	DE		; save string address
+CMPA:	LD	A,(HL)		; 
+	AND	A		; the end ?
+	JR	Z,SAME		; made it to end all equal
+	LD	A,(DE)		; 
+	CP	(HL)		; 
+	JR	NZ,NSAME	; not same
+	INC	HL		; 
+	INC	DE		; 
+	JR	CMPA		; 
+;
+NSAME:	XOR	A		; keep going till end '0' so we
+	INC	HL		; return to correct place
+	CP	(HL)		; 
+	JR	NZ,NSAME+1	; 
+	SCF			; set carry
+;
+SAME:	POP	DE		; restore string address
+	INC	HL		; point to next inst after compare string
+	EX	(SP),HL		; replace value on stack with 'hl' for ret.
+	RET
+; 
+; ilprt, display a string of characters terminated by a 0h
+;
+ILPRT:	EX	(SP),HL		; stack has address of string
+ILPRT1:	LD	A,(HL)
+	AND	A		; zero ?
+	JR	Z,ILPRT2
+	CALL	FCN2
+	INC	HL
+	JR	ILPRT1
+;
+ILPRT2:	EX	(SP),HL		; put new return address on stack
+	RET
+;
+; clear the screen
+;
+CLRSCN:	CALL	ILPRT
+	DB	ESC,'[H',ESC,'[J',0
+	RET
+;
+; print a string terminated by 0h. entered with 'hl' pointing to string
+;
+PRINT:	LD	A,(HL)		; get byte
+	AND	A
+	RET	Z		; the end
+	CALL	FCN2		; console write
+	INC	HL
+	JR	PRINT
+;
+; wait, wait 10 msec after 'lf' for slow terminals
+;
+WAIT:	LD	B,4		; 
+	LD	DE,0		; 
+WAIT1:	INC	DE		; 1.50
+	LD	A,E		; 1.00
+	CP	D		; 1.00
+	JR	NZ,WAIT1	; 2.50 = 6.00
+	DEC	B
+	RET	Z
+	JR	WAIT1
+;
+; getbio, finds current system parameters in bios and moves them into
+; program area.
+;
+GETBIO:	LD	HL,(BIOS)	; get warm boot bios address
+	LD	L,40H		; parameters start here
+	LD	BC,PRAM$LNG	; number of bytes to move
+	LD	DE,SYSPRAM	; store here
+	LDIR			; move it
+	RET
+;
+; putbio, takes updated parameters and places them in bios
+;
+PUTBIO:	LD	HL,(BIOS)	; get warm boot bios address
+	LD	L,40H		; parameters start here
+	EX	DE,HL		; destination in 'de'
+	LD	BC,PRAM$LNG	; number of bytes to move
+	LD	HL,SYSPRAM	; new param here
+	LDIR
+	RET
+;
+;  bdos function 2, console write
+;
+FCN2:	PUSH	HL		; save registers
+	PUSH	DE
+	PUSH	BC
+	PUSH	AF
+	LD	E,A
+	LD	C,2		; console write
+	CALL	BDOS
+	POP	AF
+	CP	LF
+	CALL	Z,WAIT		; wait after 'lf' for slow
+	POP	BC		; terminals
+	POP	DE
+	POP	HL
+	RET
+;
+;----------------------------------------------------------
+; lookup tables
+;----------------------------------------------------------
+;
+; clock divisor 
+;
+CLK:	DEFW	CK16		; 110 baud
+	DEFW	CK32		; 300 baud
+	DEFW	CK32		; 450 baud
+	DEFW	CK16		; 600 baud
+	DEFW	CK16		; 1200 baud
+	DEFW	CK16		; 2400 baud
+	DEFW	CK16		; 4800 baud
+	DEFW	CK16		; 9600 baud
+	DEFW	CK32		; 19200 baud
+	DEFW	CK16		; 38400 baud
+;
+; ctc commamds
+;
+CTCDIV:	DEFB	07H,142		; timer mode, 110 baud
+	DEFB	47H,208		; counter mode, 300 baud
+	DEFB	47H,139		; counter mode, 450 baud
+	DEFB	47H,208		; counter mode, 600 baud
+	DEFB	47H,104		; counter mode, 1200 baud
+	DEFB	47H,52		; counter mode, 2400 baud
+	DEFB	47H,26		; counter mode, 4800 baud
+	DEFB	47H,13		; counter mode, 9600 baud
+	DEFB	3,3		; clear ctc above 9600, 19.2 baud
+	DEFB	3,3		; ditto for 38.4 baud
+;
+; table for device ports
+;
+DEV:	DEFW	SPB		; serial port b, i/o bit 00
+	DEFW	SPA		; serial port a, i/o bit 01
+	DEFW	PPO		; parallel port, i/o bit 10
+;
+; handshake 
+;
+HNDSH:	DEFW	N
+	DEFW	Y
+;
+; data bits per character
+;
+DBITS:	DEFW	BITS5
+	DEFW	BITS7
+	DEFW	BITS6
+	DEFW	BITS8
+;
+; number of stop bits
+;
+SBITS:	DEFW	PRTS
+	DEFW	SBIT1
+	DEFW	SBIT15
+	DEFW	SBIT2
+;
+; parity table
+;
+PRTY:	DEFW	PRTN
+	DEFW	PRTO
+	DEFW	PRTN
+	DEFW	PRTE
+;
+;----------------------------------------------------------
+; data strings
+;----------------------------------------------------------
+;
+SPA:	DEFB	'Serial Port A',0
+SPB:	DEFB	'Serial Port B',0
+PPO:	DEFB	'Parallel Port',0
+;
+BITS5:	DEFB	'5 bits per character',0
+BITS6:	DEFB	'6 bits per character',0
+BITS7:	DEFB	'7 bits per character',0
+BITS8:	DEFB	'8 bits per character',0
+;
+SBIT1:	DEFB	'1 stop bit',0
+SBIT15:	DEFB	'1.5 stop bits',0
+SBIT2:	DEFB	'2 stop bits',0
+;
+PRTN:	DEFB	'none',0
+PRTO:	DEFB	'odd',0
+PRTE:	DEFB	'even',0
+PRTS:	DEFB	'?? illegal bit combination',0
+;
+B384:	DEFB	'38400',0
+B192:	DEFB	'19200',0
+B96:	DEFB	'9600',0
+B48:	DEFB	'4800',0
+B24:	DEFB	'2400',0
+B12:	DEFB	'1200',0
+B6:	DEFB	'600',0
+B4:	DEFB	'450',0
+B3:	DEFB	'300',0
+B1:	DEFB	'110',0
+;
+Y:	DEFB	'yes',0
+N:	DEFB	'no',0
+;
+SRA:	DEFB	0
+SRB:	DEFB	1
+SRC:	DEFB	2
+SRD:	DEFB	3
+;
+CK16:	DEFB	40H
+CK32:	DEFB	80H
+CK64:	DEFB	0C0H
+;
+; ---------------------------------------------------------
+; parameter storage area
+;
+PORT:	DEFS	1		; port a=0,port b=1
+SPEED:	DEFS	1		; save speed value
+TEMP0:	DEFW	1		; storage for start of subcommand
+RETURN:	DEFW	1		; storage for ccp stack pointer
+;
+; system parameters from bios as located at bios+40h
+;
+SYSPRAM:
+CTC0:	DEFW	1		; ctc0 init values
+CTC1:	DEFW	1		; ctc1 init values
+CTC2:	DEFW	1		; ctc2 init values
+CTC3:	DEFW	1		; ctc3 init values
+;
+DART:
+DARTA:	DEFS	1		; dart init values
+AWR4:	DEFS	1		; wr 4, dart 'A' side
+AWR4C:	DEFS	1		; wr 4 command
+AWR3:	DEFS	1		; wr 3
+AWR3C:	DEFS	1		; wr 3 command
+AWR5:	DEFS	1		; wr 5
+AWR5C:	DEFS	1		; wr 5 command
+	DEFS	2
+;
+	DEFS	2
+DARTB:	DEFS	1		; dart 'B' side
+BWR4:	DEFS	1		; wr 4, dart 'B' side
+BWR4C:	DEFS	1		; wr 4 command
+BWR3:	DEFS	1		; wr 3
+BWR3C:	DEFS	1		; wr 3 command
+BWR5:	DEFS	1		; wr 5
+BWR5C:	DEFS	1		; wr 5 command
+	DEFS	2
+;
+NDISK:	DEFS	1		; number of disk drives
+;
+STPRAT:	DEFS	4		; disk drive step rate
+;
+IOBYT:	DEFS	1		; i/o byte
+;
+ATOCMD:	DEFS	10		; auto-command
+;
+HSA:	DEFS	1		; hand shake port a
+HSB:	DEFS	1		; hand shake port b
+;
+VER:	DEFS	1		; bios version number
+;
+PRaM$LNG EQU	$-SYSPRAM
+
+	ORG	SYSPRAM+40H
+	DEFS	32		; stack area
+STACK:	END START
+
