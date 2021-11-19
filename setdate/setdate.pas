@@ -8,11 +8,12 @@
   simple needs and that's good enough for me!
 
   V1.0 2021/??/?? initial version
+  V1.1 2021/11/19 added date display when successfully set
 }
 PROGRAM SetDate;
 
 CONST
-  getString = 'ATRT';
+  getString = 'ATRT'; { Retro Wifi modem query NIST date/time string}
   CR = #$0D;
   LF = #$0A;
   dim : ARRAY[1..12] OF BYTE = (31,28,31,30,31,30,31,31,30,31,30,31);
@@ -20,7 +21,7 @@ CONST
   timeZoneOffset = 6;
 
 TYPE
-  DateBlockType = RECORD
+  DateBlockType = RECORD   { NovaDOS/ZRDOS date/time block }
     Julian : INTEGER;
     HourBCD : BYTE;
     MinBCD : BYTE;
@@ -30,21 +31,25 @@ TYPE
 {$I MDMINRDY}
 {$I OFFLINE }
 
+{ return True if leap year: minimal implementation for 20xx }
 FUNCTION LeapYear(y : INTEGER) : BOOLEAN;
 BEGIN
   LeapYear := ((y MOD 4) = 0) AND (y<>100);
 END;
 
+{ convert two ASCII digits to binary number }
 FUNCTION DigitsToDec(d1, d2 : CHAR) : BYTE;
 BEGIN
   DigitsToDec := 10*(Ord(d1) - $30) + Ord(d2) - $30;
 END;
 
+{ convert two ASCII digits to VCD number }
 FUNCTION DigitsToBcd(d1, d2 : CHAR) : BYTE;
 BEGIN
   DigitsToBcd := 16*(Ord(d1) - $30) + Ord(d2) - $30;
 END;
 
+{ convert year/month/day of month to Julian date where day 1 is 1978/1/1 }
 FUNCTION ToJulian(year,month,dom : INTEGER) : INTEGER;
 CONST
   dim : ARRAY[1..12] OF BYTE = (31,28,31,30,31,30,31,31,30,31,30,31);
@@ -52,24 +57,30 @@ VAR
   i,julian : INTEGER;
 BEGIN
   i := 0;
-  julian := 8035;
+  julian := 8035;              { # days between 1978/1/1 and 2000/1/1 }
   WHILE i<year DO BEGIN
     julian := julian + 365;
     IF LeapYear(i) THEN
-      julian := julian + 1;
-    i := i + 1;
+      julian := Succ(julian);
+    i := Succ(i);
   END;
   i := 1;
   WHILE i<month DO BEGIN
     julian := julian + dim[i];
     IF i=2 THEN
       IF LeapYear(year) THEN
-        julian := julian + 1;
-    i := i + 1;
+        julian := Succ(julian);
+    i := Succ(i);
   END;
   ToJulian := julian + dom;
 END;
 
+{
+  convert to local time using time zone and accounting for DST
+  minimal implementation: doesn't account for fractional hours (hi there
+  Newfoundland!) or "on standard or daylight time year round (hi there
+  Saskatchewan!): US/Canada rules
+}
 FUNCTION ToLocal(VAR year,month,dom,hour,minute,second,zoneOffset : INTEGER) : INTEGER;
 CONST
   dim : ARRAY[1..12] OF BYTE = (31,28,31,30,31,30,31,31,30,31,30,31);
@@ -98,31 +109,39 @@ BEGIN
   hour := hour + zoneoffset + dstOffset;
   IF hour < 0 THEN BEGIN
     hour := hour + 24;
-    dom := dom - 1;
-    julian := julian - 1;
+    dom := Pred(dom);
+    julian := Pred(julian);
     IF dom = 0 THEN BEGIN
-      month := month - 1;
+      month := Pred(month);
       IF month = 0 THEN BEGIN
         month := 12;
-        year := year - 1;
+        year := Pred(year);
       END;
       dom := dim[month];
     END;
   END ELSE IF hour >= 24 THEN BEGIN
     hour := hour - 24;
-    dom := dom + 1;
-    julian := julian + 1;
+    dom := Succ(dom);
+    julian := Succ(julian);
     IF dom > dim[month] THEN BEGIN
-      month := month + 1;
+      month := Succ(month);
       IF month > 12 THEN BEGIN
         month := 1;
-        year := year + 1;
+        year := Succ(year);
       END;
       dom := 1;
     END;
   END;
   ToLocal := julian;
 END;
+
+CONST
+  monthNames : ARRAY[1..12] OF STRING[3] = (
+    'Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'
+  );
+  dowNames : ARRAY[0..6] OF STRING[3] = (
+    'Sat','Sun','Mon','Tue','Wed','Thu','Fri'
+  );
 
 VAR
   year,month,dom,hour,minute,second,timeOut : INTEGER;
@@ -136,7 +155,7 @@ BEGIN
   IF ParamCount > 0 THEN
     Val(ParamStr(1),zoneOffset,code)
   ELSE
-    zoneOffset := -7;
+    zoneOffset := -7;               { default to Mountain time zone }
   line := '';
   dateSet := FALSE;
   timeOut := 0;
@@ -156,18 +175,34 @@ BEGIN
       IF ch = CR THEN BEGIN
         IF Length(line)=17 THEN BEGIN
           IF (line[1]>='0') AND (line[1]<='9') THEN BEGIN
+            { fetch NIST data }
             year := DigitsToDec(line[1],line[2]);
             month := DigitsToDec(line[4],line[5]);
             dom := DigitsToDec(line[7],line[8]);
             hour := DigitsToDec(line[10],line[11]);
             minute := DigitsToDec(line[13],line[14]);
             second := DigitsToDec(line[16],line[17]);
+            { set up NovaDOS/ZRDOS time block and set time }
             date.Julian := ToLocal(year,month,dom,hour,minute,second,zoneOffset);
             date.HourBCD := 16 * (hour DIV 10) + (hour MOD 10);
             date.MinBCD := 16 * (minute DIV 10) + (minute MOD 10);
             date.SecBCD := 16 * (second DIV 10) + (second MOD 10);
             BDOS(BDOSsetTime,Addr(date));
             dateSet := TRUE;
+            { display current time }
+            Write(
+              dowNames[date.Julian MOD 7],' ',
+              monthNames[month],'-',
+              dom:2,'-20',year,' ');
+            IF hour<10 THEN
+              Write('0');
+            Write(hour,':');
+            IF minute<10 THEN
+              Write('0');
+            Write(minute,':');
+            IF second<10 THEN
+              Write('0');
+            WriteLN(second);
           END;
         END;
         line := '';
@@ -177,10 +212,11 @@ BEGIN
     Delay(1);
     timeOut := Succ(timeOut);
   UNTIL dateSet OR (timeOut > 5000);
-
+  IF NOT dateSet THEN
+    WriteLN('Date not set');
   WHILE ModemInReady DO BEGIN
     Read(Aux, ch);
     Delay(1);
   END;
 END.
-
+
