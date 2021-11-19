@@ -79,7 +79,14 @@ allow dialling in from a remote system.
 With the changes to the SIO initialization in the BIOS data
 block, SET had to updated to reflect the new register order as
 well. Also corrected a bug in the original software that wasn't
-setting things up properly for 450 baurd.
+setting things up properly for 450 baud.
+
+## SETDATE
+
+Sets the BIOS clock from the
+[Retro WiFi Modem](https://github.com/mecparts/RetroWiFiModem). Time
+zone is settable from the command line (whole hours only), and mostly
+DST aware (US/Canada rules).
 
 ## ZTIME
 
