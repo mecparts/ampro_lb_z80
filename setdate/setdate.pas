@@ -9,6 +9,7 @@
 
   V1.0 2021/??/?? initial version
   V1.1 2021/11/19 added date display when successfully set
+  V1.2 2023/04/18 added retries
 }
 PROGRAM SetDate;
 
@@ -135,6 +136,12 @@ BEGIN
   ToLocal := julian;
 END;
 
+{ Connect to NIST and see if it will return the current }
+{ Zulu (UTC) time. If we get a valid time string, set   }
+{ the system time and return TRUE. If we get a timeout  }
+{ or error, return FALSE so the main can try again if   }
+{ it wants to.                                          }
+FUNCTION TrySetDate(zoneOffset : INTEGER) : BOOLEAN;
 CONST
   monthNames : ARRAY[1..12] OF STRING[3] = (
     'Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'
@@ -142,37 +149,25 @@ CONST
   dowNames : ARRAY[0..6] OF STRING[3] = (
     'Sat','Sun','Mon','Tue','Wed','Thu','Fri'
   );
-
 VAR
-  year,month,dom,hour,minute,second,timeOut : INTEGER;
-  zoneOffset,code : INTEGER;
+  year,month,dom,hour,minute,second,timeOut,tries : INTEGER;
+  code : INTEGER;
   date : DateBlockType;
+  dateSet : BOOLEAN;
   ch : CHAR;
   line : STRING[255];
-  dateSet : BOOLEAN;
-
 BEGIN
-  IF ParamCount > 0 THEN
-    Val(ParamStr(1),zoneOffset,code)
-  ELSE
-    zoneOffset := -7;               { default to Mountain time zone }
-  line := '';
-  dateSet := FALSE;
-  timeOut := 0;
-
-  IF NOT IsOffline THEN BEGIN
-    WriteLN('Serial port is busy.');
-    HALT;
-  END;
-
   Write(Aux, getString);
   Write(Aux, CR);
-
+  line := '';
+  timeOut := 0;
+  dateSet := FALSE;
   REPEAT
-    WHILE ModemInReady DO BEGIN
+    WHILE NOT dateSet AND ModemInReady DO BEGIN
       timeOut := 0;
       Read(Aux, ch);
       IF ch = CR THEN BEGIN
+        { WriteLn('[',line,']'); }
         IF Length(line)=17 THEN BEGIN
           IF (line[1]>='0') AND (line[1]<='9') THEN BEGIN
             { fetch NIST data }
@@ -204,6 +199,8 @@ BEGIN
               Write('0');
             WriteLN(second);
           END;
+        END ELSE IF line = 'ERROR' THEN BEGIN
+          timeOut := 5000;
         END;
         line := '';
       END ELSE IF ch <> LF THEN
@@ -212,6 +209,34 @@ BEGIN
     Delay(1);
     timeOut := Succ(timeOut);
   UNTIL dateSet OR (timeOut > 5000);
+  TrySetDate := dateSet;
+END;
+
+VAR
+  tries, zoneOffset, code : INTEGER;
+  ch : CHAR;
+  dateSet : BOOLEAN;
+
+BEGIN
+  IF ParamCount > 0 THEN
+    Val(ParamStr(1),zoneOffset,code)
+  ELSE
+    zoneOffset := -7;               { default to Mountain time zone }
+  dateSet := FALSE;
+  tries := 0;
+
+  IF NOT IsOffline THEN BEGIN
+    WriteLN('Serial port is busy.');
+    HALT;
+  END;
+
+  WHILE NOT dateSet AND (tries < 5) DO BEGIN
+    dateSet := TrySetDate(zoneOffset);
+    IF NOT dateSet THEN BEGIN
+      tries := Succ(tries);
+      Delay(3000);
+    END;
+  END;
   IF NOT dateSet THEN
     WriteLN('Date not set');
   WHILE ModemInReady DO BEGIN
@@ -219,4 +244,3 @@ BEGIN
     Delay(1);
   END;
 END.
-
