@@ -94,10 +94,10 @@ BEGIN
 END;
 
 CONST
-  quietStr = 'ATE0Q1';
-  attnStr = '+++';
+  quietStr = 'ATE0Q1S2=126';
+  attnStr = '~~~';
   hangupStr = 'ATH';
-  activeStr = 'ATE1Q0';
+  activeStr = 'ATE1Q0S2=43';
   IObyte = $0003;
 
 BEGIN
